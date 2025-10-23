@@ -141,8 +141,6 @@ class Model(nn.Module):
     def _denoise(self, data, t):
         B, D,N= data.shape
         assert data.dtype == torch.float
-        #assert t.shape == torch.Size([B]) and t.dtype == torch.int64
-
         out = self.model(data, t)
 
         assert out.shape == torch.Size([B, D, N])
@@ -338,7 +336,7 @@ def train(gpu, opt, output_dir, noises_init):
         #optimizer.load_state_dict(ckpt['optimizer_state'])
 
     if opt.model != '':
-        start_epoch = 0#torch.load(opt.model)['epoch'] + 1
+        start_epoch = torch.load(opt.model)['epoch'] + 1
     else:
         start_epoch = 0
 
@@ -354,8 +352,7 @@ def train(gpu, opt, output_dir, noises_init):
 
         lr_scheduler.step(epoch)
 
-        for i, data in enumerate(dataloader):
-            
+        for i, data in enumerate(dataloader):            
             x = data['train_points'].transpose(1,2)
             
             noises_batch = noises_init[data['idx']].transpose(1,2)
@@ -392,7 +389,7 @@ def train(gpu, opt, output_dir, noises_init):
             logger.info('Generation: eval')
 
             model.eval()
-            x = x
+            #x = x
             with torch.no_grad():
 
                 x_gen_eval = model.gen_samples(new_x_chain(x, 25).shape, x.device, clip_denoised=False)
@@ -482,10 +479,10 @@ def main():
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='./ShapeNetCore.v2.PC15k/')
+    parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     parser.add_argument('--category', default='car')
 
-    parser.add_argument('--bs', type=int, default=96, help='input batch size')
+    parser.add_argument('--bs', type=int, default=64, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
 

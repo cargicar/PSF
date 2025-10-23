@@ -22,7 +22,7 @@ models
 '''
 
 from scipy import integrate
-import sde_lib
+#import sde_lib
 def to_flattened_numpy(x):
   """Flatten a torch tensor `x` and convert it to numpy."""
   return x.detach().cpu().numpy().reshape((-1,))
@@ -624,8 +624,8 @@ def main(opt):
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='./data/ShapeNetCore.v2.PC15k/')
-    parser.add_argument('--category', default='chair')
+    parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
+    parser.add_argument('--category', default='car')
     parser.add_argument('--step', type=int, default=1000)
     parser.add_argument('--batch_size', type=int, default=50, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')

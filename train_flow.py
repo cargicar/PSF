@@ -18,22 +18,22 @@ class Flowmodel:
         self.num_timesteps = opt.time_num
         return
 
-    def p_mean(self, denoise_fn, data, t):
+    def p_mean(self, denoise_fn, data_t, t):
 
-        model_output = denoise_fn(data, t)
+        model_output = denoise_fn(data_t, t)
 
-        model_mean = data + model_output * 1. / self.num_timesteps
+        model_mean = data_t + model_output * 1. / self.num_timesteps
 
         return model_mean
 
 
     ''' samples '''
 
-    def p_sample(self, denoise_fn, data, t, noise_fn, clip_denoised=False, return_pred_xstart=False):
+    def p_sample(self, denoise_fn, data_t, t, noise_fn, clip_denoised=False, return_pred_xstart=False):
         """
         Sample from the model
         """
-        model_mean = self.p_mean(denoise_fn, data=data, t=t)
+        model_mean = self.p_mean(denoise_fn, data_t=data_t, t=t)
 
         return model_mean
 
@@ -50,7 +50,7 @@ class Flowmodel:
         img_t = noise_fn(size=shape, dtype=torch.float, device=device)
         for t in range(self.num_timesteps):
             t_ = torch.empty(shape[0], dtype=torch.int64, device=device).fill_(t)
-            img_t = self.p_sample(denoise_fn=denoise_fn, data=img_t,t=t_, noise_fn=noise_fn,
+            img_t = self.p_sample(denoise_fn=denoise_fn, data_t=img_t, t=t_, noise_fn=noise_fn,
                                   clip_denoised=clip_denoised, return_pred_xstart=False)
 
         assert img_t.shape == shape
@@ -74,7 +74,7 @@ class Flowmodel:
         for t in range(self.num_timesteps):
 
             t_ = torch.empty(shape[0], dtype=torch.int64, device=device).fill_(t)
-            img_t = self.p_sample(denoise_fn=denoise_fn, data=img_t, t=t_, noise_fn=noise_fn,
+            img_t = self.p_sample(denoise_fn=denoise_fn, data_t=img_t, t=t_, noise_fn=noise_fn,
                                   clip_denoised=clip_denoised,
                                   return_pred_xstart=False)
             if t % freq == 0 or t == total_steps-1:
@@ -186,7 +186,8 @@ def get_betas(schedule_type, b_start, b_end, time_num):
     if schedule_type == 'linear':
         betas = np.linspace(b_start, b_end, time_num)
     elif schedule_type == 'warm0.1':
-
+        # opt.beta_start = 1e-5
+        # opt.beta_end = 0.008
         betas = b_end * np.ones(time_num, dtype=np.float64)
         warmup_time = int(time_num * 0.1)
         betas[:warmup_time] = np.linspace(b_start, b_end, warmup_time, dtype=np.float64)
@@ -479,10 +480,10 @@ def main():
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
+    parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     parser.add_argument('--category', default='car')
 
-    parser.add_argument('--bs', type=int, default=64, help='input batch size')
+    parser.add_argument('--bs', type=int, default=128, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
 

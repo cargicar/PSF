@@ -32,7 +32,7 @@ install guideline [here](https://github.com/facebookresearch/pytorch3d/blob/main
 Install PyTorchEMD by
 ```
 cd metrics/PyTorchEMD
-python setup.py install
+python setup.py install --user
 cp build/**/emd_cuda.cpython-36m-x86_64-linux-gnu.so .
 ```
 

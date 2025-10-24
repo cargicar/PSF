@@ -4,7 +4,7 @@ from torch.utils.cpp_extension import load
 
 _src_path = os.path.dirname(os.path.abspath(__file__))
 _backend = load(name='_pvcnn_backend',
-                extra_cflags=['-O3', '-std=c++17'],
+                extra_cflags=['-O3', '-std=c++17', '-DTHRUST_IGNORE_CUB_VERSION_CHECK'],
                 sources=[os.path.join(_src_path,'src', f) for f in [
                     'ball_query/ball_query.cpp',
                     'ball_query/ball_query.cu',

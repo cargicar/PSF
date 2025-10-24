@@ -5,6 +5,8 @@ from metrics.evaluation_metrics import compute_all_metrics, EMD_CD
 
 import torch.nn as nn
 import torch.utils.data
+from torch.utils.data import Subset
+
 
 import argparse
 from torch.distributions import Normal
@@ -494,9 +496,11 @@ def evaluate_gen(opt, ref_pcs, logger):
 
     if ref_pcs is None:
         _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category, use_mask=False)
+        
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
                                                       shuffle=False, num_workers=int(opt.workers), drop_last=False)
         ref = []
+        print(f"Starting evluation reference PC from {len(test_dataloader.dataset)} samples...")
         for data in tqdm(test_dataloader, total=len(test_dataloader), desc='Generating Samples'):
             x = data['test_points']
             m, s = data['mean'].float(), data['std'].float()
@@ -530,10 +534,17 @@ def evaluate_gen(opt, ref_pcs, logger):
 def generate(model, opt):
 
     _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category)
+    #FIXME hardcoded
+    subset = True
+    N = 10
+    if subset:
+        indices = list(range(N))
+        # Create the Subset object
+        test_dataset = Subset(test_dataset, indices)
 
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
                                                   shuffle=False, num_workers=int(opt.workers), drop_last=False)
-
+    print(f"Starting generation for {len(test_dataloader.dataset)} samples...")
     with torch.no_grad():
 
         samples = []
@@ -624,10 +635,10 @@ def main(opt):
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
+    parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     parser.add_argument('--category', default='car')
     parser.add_argument('--step', type=int, default=1000)
-    parser.add_argument('--batch_size', type=int, default=50, help='input batch size')
+    parser.add_argument('--batch_size', type=int, default=128, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=10000, help='number of epochs to train for')
 
@@ -640,7 +651,7 @@ def parse_args():
     parser.add_argument('--beta_start', default=0.0001)
     parser.add_argument('--beta_end', default=0.02)
     parser.add_argument('--schedule_type', default='linear')
-    parser.add_argument('--time_num', default=1000)
+    parser.add_argument('--time_num', default=10)
 
     #params
     parser.add_argument('--attention', default=True)

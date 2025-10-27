@@ -577,7 +577,6 @@ def train(gpu, opt, output_dir, noises_init):
                 noises_batch = noises_batch.cuda()
             break
 
-
         if 1:
             logger.info('Generation: eval')
 
@@ -591,12 +590,12 @@ def train(gpu, opt, output_dir, noises_init):
                     x0.append(x_gen_eval[0])
                     x1.append(x_gen_eval[1])
 
-                    print('Step', i)
+                    print('Training Step', i)
 
                 x0 = torch.cat(x0, 0)
                 x1 = torch.cat(x1, 0)
                 # This should be parallely sampled with 8 GPUs in practice , here we only use one as example
-                torch.save([x0, x1], 'DATASET.pth')
+                torch.save([x0, x1], f'DATASET.pth')
 
                 exit(0)
 
@@ -633,10 +632,10 @@ def main():
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='./data/ShapeNetCore.v2.PC15k/')
+    parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     parser.add_argument('--category', default='chair')
 
-    parser.add_argument('--bs', type=int, default=16, help='input batch size')
+    parser.add_argument('--bs', type=int, default=50, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=10000, help='number of epochs to train for')
 

@@ -20,8 +20,8 @@ class LazyPklDataset(Dataset):
         # The core of lazy loading: a map from global index to (file_path, local_index)
         self.global_index_map: List[Tuple[str, int]] = []
         #FIXME Temporary
-        self.pkl = None
-        self.npy = None
+        self.pkl = False
+        self.npy = False
         self._create_global_index_map()
 
     def _create_global_index_map(self):
@@ -124,9 +124,8 @@ class LazyPklDataset(Dataset):
             # Normalization
             energy = (energy - min_e) / (max_e - min_e)
         elif self.npy:
-            #Load the entire file (the I/O-heavy step, done only when needed)
-            data = np.load(file_path)
-                
+        
+            data = np.load(file_path, mmap_mode='r')
             # Extract the necessary data arrays (assuming they are single-element lists)
             all_showers_in_file = data
             
@@ -135,7 +134,6 @@ class LazyPklDataset(Dataset):
             energy = 0.0
             pid = 0
             gap_pid = 0
-
         if self.transform:
             shower = self.transform(shower)
 
@@ -148,7 +146,7 @@ class LazyPklDataset(Dataset):
         gap_pid = torch.tensor(gap_pid).long()
 
         # Return the tensors
-        return (shower, energy, pid, gap_pid)
+        return (shower, energy, pid, gap_pid, idx)
 
 class PointCloudMasks(object):
     '''

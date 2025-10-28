@@ -136,8 +136,11 @@ class Model(nn.Module):
         super(Model, self).__init__()
         self.flow = Flowmodel(args)
 
-        self.model = PVCNN2(num_classes=args.nc, embed_dim=args.embed_dim, use_att=args.attention,
-                            dropout=args.dropout, extra_feature_channels=0)
+        self.model = PVCNN2(num_classes=args.nc, 
+                            embed_dim=args.embed_dim, 
+                            use_att=args.attention,
+                            dropout=args.dropout, 
+                            extra_feature_channels=1) #<--- energy. #NOTE maybe we can add the remaining features as extra channels?? 
 
 
     def _denoise(self, data, t):
@@ -319,7 +322,7 @@ def train(gpu, opt, output_dir, noises_init):
         Returns:
             A tuple of batched PyTorch tensors.
         """
-        showers_list, energies_list, pids_list, gap_pids_list = zip(*batch)
+        showers_list, energies_list, pids_list, gap_pids_list, idx = zip(*batch)
 
         padded_showers = []
         for shower in showers_list:
@@ -339,7 +342,7 @@ def train(gpu, opt, output_dir, noises_init):
         pids_batch = torch.stack(pids_list, dim=0)
         gap_pids_batch = torch.stack(gap_pids_list, dim=0)
 
-        return showers_batch, energies_batch, pids_batch, gap_pids_batch
+        return showers_batch, energies_batch, pids_batch, gap_pids_batch, idx
 
     train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
     dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=pad_collate_fn)
@@ -397,24 +400,24 @@ def train(gpu, opt, output_dir, noises_init):
 
 
     for epoch in range(start_epoch, opt.niter):
-
         if opt.distribution_type == 'multi':
             train_sampler.set_epoch(epoch)
 
         lr_scheduler.step(epoch)
 
-        for i, data in enumerate(dataloader):      
+        for i, data in enumerate(dataloader):  
             if opt.dataname == 'g4':
-                x, energy, y, gap_pid = data
-                x_pc = x[:,:, :3]
+                x, energy, y, gap_pid, idx = data
+                # x_pc = x[:,:,:3]
                 # visualize_pointcloud_batch('%s/epoch_%03d_training_point.png' % (outf_syn, epoch),
                 #                        x_pc, None, None,
                 #                        None)
+            
+                x = x.transpose(1,2)
                 
             elif opt.dataname == 'shapenet':      
                 x = data['train_points'].transpose(1,2)
-            noises_batch = noises_init[data['idx']].transpose(1,2)
-
+            noises_batch = noises_init[list(idx)].transpose(1,2)
 
             if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
                 x = x.cuda(gpu)
@@ -521,6 +524,7 @@ def main():
     ''' workaround '''
     train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name =opt.dataname)
     noises_init = torch.randn(len(train_dataset), opt.npoints, opt.nc)
+    
 
     if opt.dist_url == "env://" and opt.world_size == -1:
         opt.world_size = int(os.environ["WORLD_SIZE"])
@@ -540,12 +544,12 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     parser.add_argument('--dataroot', default='/data/ccardona/datasets/G4_individual_sims_npy_e_liquidArgon/')
     parser.add_argument('--category', default='car')
-    parser.add_argument('--dataname',  default='shapenet', help='dataset name: shapenet | g4')
+    parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--bs', type=int, default=64, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
 
-    parser.add_argument('--nc', default=3)
+    parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)
     '''model'''
     parser.add_argument('--beta_start', default=0.0001)

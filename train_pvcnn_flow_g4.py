@@ -14,6 +14,10 @@ import torch.distributed as dist
 from datasets.shapenet_data_pc import ShapeNet15kPointClouds
 from datasets.g4_pc_dataset import LazyPklDataset
 from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
+#from rectified_flow.models.dit import DiT, DiTConfig
+from rectified_flow.rectified_flow import RectifiedFlow
+from rectified_flow.samplers import EulerSampler
+from rectified_flow.samplers.base_sampler import Sampler
 
 class Flowmodel:
     def __init__(self, opt):

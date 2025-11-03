@@ -13,8 +13,8 @@ if [ $? -ne 0 ]; then
 fi
 
 # 2. Activate the 'psf' Conda environment
-echo "Activating 'psf' Conda environment..."
-conda activate psf
+echo "Activating 'py312' Conda environment..."
+conda activate py312
 
 # Check if the Conda environment activation was successful
 # (Conda activation sometimes exits with 0 even on failure, but this is standard practice)
@@ -24,8 +24,8 @@ if [ $? -ne 0 ]; then
 fi
 
 # 3. Load the necessary system modules (GCC, CUDA, PyTorch)
-echo "Loading system modules: gcc, cudatoolkit, pytorch..."
-ml gcc cudatoolkit pytorch
+echo "Loading system module pytorch..."
+ml pytorch
 
 # Check if the modules loaded successfully
 if [ $? -ne 0 ]; then

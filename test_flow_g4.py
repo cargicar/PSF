@@ -2,7 +2,6 @@ import torch
 from pprint import pprint
 from metrics.evaluation_metrics import jsd_between_point_cloud_sets as JSD
 from metrics.evaluation_metrics import compute_all_metrics, EMD_CD
-
 import torch.nn as nn
 import torch.utils.data
 
@@ -16,6 +15,8 @@ from model.pvcnn_generation import PVCNN2Base
 from tqdm import tqdm
 
 from datasets.shapenet_data_pc import ShapeNet15kPointClouds
+from datasets.g4_pc_dataset import LazyPklDataset
+from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
 
 '''
 models
@@ -469,40 +470,124 @@ def get_constrain_function(ground_truth, mask, eps, num_steps=1):
 
 #############################################################################
 
-def get_dataset(dataroot, npoints,category,use_mask=False):
-    tr_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
-        categories=[category], split='train',
-        tr_sample_size=npoints,
-        te_sample_size=npoints,
-        scale=1.,
-        normalize_per_shape=False,
-        normalize_std_per_axis=False,
-        random_subsample=True, use_mask = use_mask)
-    te_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
-        categories=[category], split='val',
-        tr_sample_size=npoints,
-        te_sample_size=npoints,
-        scale=1.,
-        normalize_per_shape=False,
-        normalize_std_per_axis=False,
-        all_points_mean=tr_dataset.all_points_mean,
-        all_points_std=tr_dataset.all_points_std,
-        use_mask=use_mask
-    )
-    return tr_dataset, te_dataset
+def get_dataset(dataroot, npoints,category, name='shapenet'):
+    if name == 'shapenet':
+        train_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
+            categories=[category], split='train',
+            tr_sample_size=npoints,
+            te_sample_size=npoints,
+            scale=1.,
+            reflow = False,
+            normalize_per_shape=False,
+            normalize_std_per_axis=False,
+            random_subsample=True)
+        test_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
+            categories=[category], split='val',
+            tr_sample_size=npoints,
+            te_sample_size=npoints,
+            scale=1.,
+            reflow = False,
+            normalize_per_shape=False,
+            normalize_std_per_axis=False,
+            all_points_mean=tr_dataset.all_points_mean,
+            all_points_std=tr_dataset.all_points_std,
+        )
+    elif name == 'g4':
+        
+        centroid_transform = CentroidNormalize()
+        #minmax_transform = MinMaxNormalize(min_vals, max_vals)
 
+        composed_transform = Compose([
+                            centroid_transform,
+        #                    minmax_transform,
+                            ])
+
+        #dataset.transform = minmax_transform
+        dataset = LazyPklDataset(os.path.join(dataroot), transform=None)
+        # Define the split ratios
+        total_size = len(dataset)
+        num_train = int(total_size * 0.8)
+        num_val = total_size - num_train
+        lengths = [num_train, num_val]
+
+        RNG = torch.Generator().manual_seed(42)
+
+        # 2. Pass the generator to random_split
+        train_dataset, test_dataset = torch.utils.data.random_split(
+            dataset, 
+            lengths, 
+            generator=RNG  # This line makes the split reproducible
+        )
+        
+        #te_dataset = LazyPklDataset(os.path.join(dataroot, 'val'), transform
+    return train_dataset, test_dataset
 
 
 def evaluate_gen(opt, ref_pcs, logger):
+    #NOTE passing here to read max_particles from the args. Look for a way to do it from dataset
+    def pad_collate_fn(batch, max_particles=opt.npoints):
+        """
+        Custom collate function to handle batches of showers with varying numbers of particles.
+        It pads or truncates each shower to a fixed size and then stacks them.
+
+        Args:
+            batch (list): A list of data samples from the dataset.
+            max_particles (int): The maximum number of particles to keep per shower.
+        Returns:
+            A tuple of batched PyTorch tensors.
+        """
+        showers_list, energies_list, pids_list, gap_pids_list, idx = zip(*batch)
+
+        padded_showers = []
+        for shower in showers_list:
+            num_particles = shower.shape[0]
+            if num_particles > max_particles:
+                # Truncate if the number of particles exceeds the max
+                padded_shower = shower[:max_particles]
+            else:
+                # Pad with zeros if the number of particles is less than the max
+                padding = torch.zeros(max_particles - num_particles, shower.shape[1], dtype=shower.dtype, device=shower.device)
+                padded_shower = torch.cat([shower, padding], dim=0)
+            padded_showers.append(padded_shower)
+
+        # Stack all tensors to create the batch
+        showers_batch = torch.stack(padded_showers, dim=0)
+        energies_batch = torch.stack(energies_list, dim=0)
+        pids_batch = torch.stack(pids_list, dim=0)
+        gap_pids_batch = torch.stack(gap_pids_list, dim=0)
+
+        return showers_batch, energies_batch, pids_batch, gap_pids_batch, idx
+
 
     if ref_pcs is None:
-        _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category, use_mask=False)
+        _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
-                                                      shuffle=False, num_workers=int(opt.workers), drop_last=False)
+                                                      shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=pad_collate_fn)
+        #NOTE for debugging purposses 
+        subset_size = 2
+        subset_indices = torch.randperm(len(test_dataset))[:subset_size]
+        subset_dataset = torch.utils.data.Subset(test_dataset, subset_indices)
+        subset_dataloader = torch.utils.data.DataLoader(subset_dataset, batch_size=opt.batch_size,
+                                                      shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=pad_collate_fn) 
+
         ref = []
-        for data in tqdm(test_dataloader, total=len(test_dataloader), desc='Generating Samples'):
-            x = data['test_points']
-            m, s = data['mean'].float(), data['std'].float()
+        #for data in tqdm(test_dataloader, total=len(test_dataloader), desc='Generating Samples'):
+        breakpoint()
+        for data in tqdm(subset_dataloader, total=len(subset_dataloader), desc='Generating Samples'):
+            if opt.dataname == 'g4':
+                x, energy, y, gap_pid, idx = data
+                # x_pc = x[:,:,:3]
+                # outf_syn = f"/global/homes/c/ccardona/PSF"
+                # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
+                #                        x_pc, None, None,
+                #                        None)
+                
+                x = x.transpose(1,2)
+                m=0
+                s=1
+            elif opt.dataname == 'shapenet':      
+                x = data['test_points'].transpose(1,2)
+                m, s = data['mean'].float(), data['std'].float()
 
             ref.append(x*s + m)
 
@@ -523,7 +608,10 @@ def evaluate_gen(opt, ref_pcs, logger):
 
     pprint(results)
     logger.info(results)
-
+    #FIXME JSD will be computed on spatial dimension for now. Due to implementation constrainst
+    if opt.dataname == 'g4':
+        sample_pcs = sample_pcs[:,:,:3]
+        ref_pcs = ref_pcs[:,:,:3]
     jsd = JSD(sample_pcs.numpy(), ref_pcs.numpy())
     pprint('JSD: {}'.format(jsd))
     logger.info('JSD: {}'.format(jsd))
@@ -532,10 +620,44 @@ def evaluate_gen(opt, ref_pcs, logger):
 
 def generate(model, opt):
 
-    _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category)
+    #NOTE passing here to read max_particles from the args. Look for a way to do it from dataset
+    def pad_collate_fn(batch, max_particles=opt.npoints):
+        """
+        Custom collate function to handle batches of showers with varying numbers of particles.
+        It pads or truncates each shower to a fixed size and then stacks them.
 
+        Args:
+            batch (list): A list of data samples from the dataset.
+            max_particles (int): The maximum number of particles to keep per shower.
+        Returns:
+            A tuple of batched PyTorch tensors.
+        """
+        showers_list, energies_list, pids_list, gap_pids_list, idx = zip(*batch)
+
+        padded_showers = []
+        for shower in showers_list:
+            num_particles = shower.shape[0]
+            if num_particles > max_particles:
+                # Truncate if the number of particles exceeds the max
+                padded_shower = shower[:max_particles]
+            else:
+                # Pad with zeros if the number of particles is less than the max
+                padding = torch.zeros(max_particles - num_particles, shower.shape[1], dtype=shower.dtype, device=shower.device)
+                padded_shower = torch.cat([shower, padding], dim=0)
+            padded_showers.append(padded_shower)
+
+        # Stack all tensors to create the batch
+        showers_batch = torch.stack(padded_showers, dim=0)
+        energies_batch = torch.stack(energies_list, dim=0)
+        pids_batch = torch.stack(pids_list, dim=0)
+        gap_pids_batch = torch.stack(gap_pids_list, dim=0)
+
+        return showers_batch, energies_batch, pids_batch, gap_pids_batch, idx
+
+
+    _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
-                                                  shuffle=False, num_workers=int(opt.workers), drop_last=False)
+                                                      shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=pad_collate_fn)
 
     with torch.no_grad():
 
@@ -543,13 +665,24 @@ def generate(model, opt):
         ref = []
 
         for i, data in tqdm(enumerate(test_dataloader), total=len(test_dataloader), desc='Generating Samples'):
-
-            x = data['test_points'].transpose(1,2)
-            m, s = data['mean'].float(), data['std'].float()
-
+            if opt.dataname == 'g4':
+                x, energy, y, gap_pid, idx = data
+                # x_pc = x[:,:,:3]
+                # outf_syn = f"/global/homes/c/ccardona/PSF"
+                # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
+                #                        x_pc, None, None,
+                #                        None)
+                
+                x = x.transpose(1,2)
+                m=0
+                s=1
+            elif opt.dataname == 'shapenet':      
+                x = data['test_points'].transpose(1,2)
+                m, s = data['mean'].float(), data['std'].float()
+        
             gen = model.gen_samples(x.shape,
                                        'cuda', clip_denoised=False).detach().cpu()
-
+            
             gen = gen.transpose(1,2).contiguous()
             x = x.transpose(1,2).contiguous()
 
@@ -630,6 +763,7 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     parser.add_argument('--category', default='car')
+    parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--step', type=int, default=1000)
     parser.add_argument('--batch_size', type=int, default=50, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
@@ -638,8 +772,8 @@ def parse_args():
     parser.add_argument('--generate',default=True)
     parser.add_argument('--eval_gen', default=True)
 
-    parser.add_argument('--nc', default=4)
-    parser.add_argument('--npoints', default=2048)
+    parser.add_argument('--nc',  type=int, default=4)
+    parser.add_argument('--npoints', type=int, default=2048)
     '''model'''
     parser.add_argument('--beta_start', default=0.0001)
     parser.add_argument('--beta_end', default=0.02)

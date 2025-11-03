@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data
 
-
 import argparse
 from torch.distributions import Normal
 
@@ -15,19 +14,136 @@ from datasets.shapenet_data_pc import ShapeNet15kPointClouds
 from datasets.g4_pc_dataset import LazyPklDataset
 from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
 
-class Flowmodel:
-    def __init__(self, opt):
-        self.num_timesteps = opt.time_num
-        return
+class GaussianDiffusion:
+    def __init__(self,betas, loss_type, model_mean_type, model_var_type):
+        self.loss_type = loss_type
+        self.model_mean_type = model_mean_type
+        self.model_var_type = model_var_type
+        assert isinstance(betas, np.ndarray)
+        self.np_betas = betas = betas.astype(np.float64)  # computations here in float64 for accuracy
+        assert (betas > 0).all() and (betas <= 1).all()
+        timesteps, = betas.shape
+        self.num_timesteps = int(timesteps)
 
-    def p_mean(self, denoise_fn, data, t):
+        alphas = 1. - betas
+        alphas_cumprod = torch.from_numpy(np.cumprod(alphas, axis=0)).float()
+        alphas_cumprod_prev = torch.from_numpy(np.append(1., alphas_cumprod[:-1])).float()
+
+        self.betas = torch.from_numpy(betas).float()
+        self.alphas_cumprod = alphas_cumprod.float()
+        self.alphas_cumprod_prev = alphas_cumprod_prev.float()
+
+        # calculations for diffusion q(x_t | x_{t-1}) and others
+        self.sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod).float()
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod).float()
+        self.log_one_minus_alphas_cumprod = torch.log(1. - alphas_cumprod).float()
+        self.sqrt_recip_alphas_cumprod = torch.sqrt(1. / alphas_cumprod).float()
+        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1. / alphas_cumprod - 1).float()
+
+        betas = torch.from_numpy(betas).float()
+        alphas = torch.from_numpy(alphas).float()
+        # calculations for posterior q(x_{t-1} | x_t, x_0)
+        posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+        # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
+        self.posterior_variance = posterior_variance
+        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
+        self.posterior_log_variance_clipped = torch.log(torch.max(posterior_variance, 1e-20 * torch.ones_like(posterior_variance)))
+        self.posterior_mean_coef1 = betas * torch.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)
+        self.posterior_mean_coef2 = (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod)
+
+    @staticmethod
+    def _extract(a, t, x_shape):
+        """
+        Extract some coefficients at specified timesteps,
+        then reshape to [batch_size, 1, 1, 1, 1, ...] for broadcasting purposes.
+        """
+        bs, = t.shape
+        assert x_shape[0] == bs
+        out = torch.gather(a, 0, t)
+        assert out.shape == torch.Size([bs])
+        return torch.reshape(out, [bs] + ((len(x_shape) - 1) * [1]))
+
+
+
+    def q_mean_variance(self, x_start, t):
+        mean = self._extract(self.sqrt_alphas_cumprod.to(x_start.device), t, x_start.shape) * x_start
+        variance = self._extract(1. - self.alphas_cumprod.to(x_start.device), t, x_start.shape)
+        log_variance = self._extract(self.log_one_minus_alphas_cumprod.to(x_start.device), t, x_start.shape)
+        return mean, variance, log_variance
+
+    def q_sample(self, x_start, t, noise=None):
+        """
+        Diffuse the data (t == 0 means diffused for 1 step)
+        """
+        if noise is None:
+            noise = torch.randn(x_start.shape, device=x_start.device)
+        assert noise.shape == x_start.shape
+        return (
+                self._extract(self.sqrt_alphas_cumprod.to(x_start.device), t, x_start.shape) * x_start +
+                self._extract(self.sqrt_one_minus_alphas_cumprod.to(x_start.device), t, x_start.shape) * noise
+        )
+
+
+    def q_posterior_mean_variance(self, x_start, x_t, t):
+        """
+        Compute the mean and variance of the diffusion posterior q(x_{t-1} | x_t, x_0)
+        """
+        assert x_start.shape == x_t.shape
+        posterior_mean = (
+                self._extract(self.posterior_mean_coef1.to(x_start.device), t, x_t.shape) * x_start +
+                self._extract(self.posterior_mean_coef2.to(x_start.device), t, x_t.shape) * x_t
+        )
+        posterior_variance = self._extract(self.posterior_variance.to(x_start.device), t, x_t.shape)
+        posterior_log_variance_clipped = self._extract(self.posterior_log_variance_clipped.to(x_start.device), t, x_t.shape)
+        assert (posterior_mean.shape[0] == posterior_variance.shape[0] == posterior_log_variance_clipped.shape[0] ==
+                x_start.shape[0])
+        return posterior_mean, posterior_variance, posterior_log_variance_clipped
+
+
+    def p_mean_variance(self, denoise_fn, data, t, clip_denoised: bool, return_pred_xstart: bool):
 
         model_output = denoise_fn(data, t)
 
-        model_mean = data + model_output * 1. / self.num_timesteps
 
-        return model_mean
+        if self.model_var_type in ['fixedsmall', 'fixedlarge']:
+            # below: only log_variance is used in the KL computations
+            model_variance, model_log_variance = {
+                # for fixedlarge, we set the initial (log-)variance like so to get a better decoder log likelihood
+                'fixedlarge': (self.betas.to(data.device),
+                               torch.log(torch.cat([self.posterior_variance[1:2], self.betas[1:]])).to(data.device)),
+                'fixedsmall': (self.posterior_variance.to(data.device), self.posterior_log_variance_clipped.to(data.device)),
+            }[self.model_var_type]
+            model_variance = self._extract(model_variance, t, data.shape) * torch.ones_like(data)
+            model_log_variance = self._extract(model_log_variance, t, data.shape) * torch.ones_like(data)
+        else:
+            raise NotImplementedError(self.model_var_type)
+        model_mean = data + model_output * 1 / 1000.
 
+
+        if self.model_mean_type == 'eps':
+            x_recon = model_mean#self._predict_xstart_from_eps(data, t=t, eps=model_output)
+
+            if clip_denoised:
+                x_recon = torch.clamp(x_recon, -.5, .5)
+
+            #model_mean, _, _ = self.q_posterior_mean_variance(x_start=x_recon, x_t=data, t=t)
+        else:
+            raise NotImplementedError(self.loss_type)
+
+
+        assert model_mean.shape == x_recon.shape == data.shape
+        assert model_variance.shape == model_log_variance.shape == data.shape
+        if return_pred_xstart:
+            return model_mean, model_variance, model_log_variance, x_recon
+        else:
+            return model_mean, model_variance, model_log_variance
+
+    def _predict_xstart_from_eps(self, x_t, t, eps):
+        assert x_t.shape == eps.shape
+        return (
+                self._extract(self.sqrt_recip_alphas_cumprod.to(x_t.device), t, x_t.shape) * x_t -
+                self._extract(self.sqrt_recipm1_alphas_cumprod.to(x_t.device), t, x_t.shape) * eps
+        )
 
     ''' samples '''
 
@@ -35,9 +151,17 @@ class Flowmodel:
         """
         Sample from the model
         """
-        model_mean = self.p_mean(denoise_fn, data=data, t=t)
+        model_mean, _, model_log_variance, pred_xstart = self.p_mean_variance(denoise_fn, data=data, t=t, clip_denoised=clip_denoised,
+                                                                 return_pred_xstart=True)
+        noise = noise_fn(size=data.shape, dtype=data.dtype, device=data.device)
+        assert noise.shape == data.shape
+        # no noise when t == 0
+        nonzero_mask = torch.reshape(1 - (t == 0).float(), [data.shape[0]] + [1] * (len(data.shape) - 1))
 
-        return model_mean
+        #sample = model_mean + nonzero_mask * torch.exp(0.5 * model_log_variance) * noise
+        sample = model_mean
+        assert sample.shape == pred_xstart.shape
+        return (sample, pred_xstart) if return_pred_xstart else sample
 
 
     def p_sample_loop(self, denoise_fn, shape, device,
@@ -50,13 +174,16 @@ class Flowmodel:
 
         assert isinstance(shape, (tuple, list))
         img_t = noise_fn(size=shape, dtype=torch.float, device=device)
-        for t in range(self.num_timesteps):
+        x0 = img_t
+        for t in range(0, self.num_timesteps):
+            if t % 100 == 0:
+                print('step', t)
             t_ = torch.empty(shape[0], dtype=torch.int64, device=device).fill_(t)
             img_t = self.p_sample(denoise_fn=denoise_fn, data=img_t,t=t_, noise_fn=noise_fn,
                                   clip_denoised=clip_denoised, return_pred_xstart=False)
 
         assert img_t.shape == shape
-        return img_t
+        return x0, img_t
 
     def p_sample_loop_trajectory(self, denoise_fn, shape, device, freq,
                                  noise_fn=torch.randn,clip_denoised=True, keep_running=False):
@@ -73,7 +200,7 @@ class Flowmodel:
 
         img_t = noise_fn(size=shape, dtype=torch.float, device=device)
         imgs = [img_t]
-        for t in range(self.num_timesteps):
+        for t in range(0,total_steps):
 
             t_ = torch.empty(shape[0], dtype=torch.int64, device=device).fill_(t)
             img_t = self.p_sample(denoise_fn=denoise_fn, data=img_t, t=t_, noise_fn=noise_fn,
@@ -85,12 +212,20 @@ class Flowmodel:
         assert imgs[-1].shape == shape
         return imgs
 
-    @torch.no_grad()
-    def sample_pairs(self, data, x0 = None):
-        if x0 is None:
-            x0 = torch.randn_like(data)
+    '''losses'''
 
-        z0 = x0
+    def _vb_terms_bpd(self, denoise_fn, data_start, data_t, t, clip_denoised: bool, return_pred_xstart: bool):
+        true_mean, _, true_log_variance_clipped = self.q_posterior_mean_variance(x_start=data_start, x_t=data_t, t=t)
+        model_mean, _, model_log_variance, pred_xstart = self.p_mean_variance(
+            denoise_fn, data=data_t, t=t, clip_denoised=clip_denoised, return_pred_xstart=True)
+        kl = normal_kl(true_mean, true_log_variance_clipped, model_mean, model_log_variance)
+        kl = kl.mean(dim=list(range(1, len(data_start.shape)))) / np.log(2.)
+
+        return (kl, pred_xstart) if return_pred_xstart else kl
+
+    def sample_pairs(self, data, z0 = None):
+        if z0 is None:
+            z0 = torch.randn_like(data)
         t= torch.rand((data.shape[0], 1, 1)).to(data.device)
         inter_data = t * data + (1.-t) * z0
         target = data - z0
@@ -100,13 +235,75 @@ class Flowmodel:
         """
         Training loss calculation
         """
+        B, D, N = data_start.shape
+        assert t.shape == torch.Size([B])
+
+        if noise is None:
+            noise = torch.randn(data_start.shape, dtype=data_start.dtype, device=data_start.device)
+        assert noise.shape == data_start.shape and noise.dtype == data_start.dtype
         inter_data, t, target = self.sample_pairs(data_start)
         t = t.squeeze()
-        data_t = inter_data
-        eps_recon = denoise_fn(data_t, t)
-        losses = ((target - eps_recon)**2).mean(dim=list(range(1, len(data_start.shape))))
+        data_t = inter_data#self.q_sample(x_start=data_start, t=t, noise=noise)
 
+        if self.loss_type == 'mse':
+            # predict the noise instead of x_start. seems to be weighted naturally like SNR
+            eps_recon = denoise_fn(data_t, t)
+            assert data_t.shape == data_start.shape
+            assert eps_recon.shape == torch.Size([B, D, N])
+            assert eps_recon.shape == data_start.shape
+            losses = ((target - eps_recon)**2).mean(dim=list(range(1, len(data_start.shape))))
+        elif self.loss_type == 'kl':
+            losses = self._vb_terms_bpd(
+                denoise_fn=denoise_fn, data_start=data_start, data_t=data_t, t=t, clip_denoised=False,
+                return_pred_xstart=False)
+        else:
+            raise NotImplementedError(self.loss_type)
+
+        assert losses.shape == torch.Size([B])
         return losses
+
+    '''debug'''
+
+    def _prior_bpd(self, x_start):
+
+        with torch.no_grad():
+            B, T = x_start.shape[0], self.num_timesteps
+            t_ = torch.empty(B, dtype=torch.int64, device=x_start.device).fill_(T-1)
+            qt_mean, _, qt_log_variance = self.q_mean_variance(x_start, t=t_)
+            kl_prior = normal_kl(mean1=qt_mean, logvar1=qt_log_variance,
+                                 mean2=torch.tensor([0.]).to(qt_mean), logvar2=torch.tensor([0.]).to(qt_log_variance))
+            assert kl_prior.shape == x_start.shape
+            return kl_prior.mean(dim=list(range(1, len(kl_prior.shape)))) / np.log(2.)
+
+    def calc_bpd_loop(self, denoise_fn, x_start, clip_denoised=True):
+
+        with torch.no_grad():
+            B, T = x_start.shape[0], self.num_timesteps
+
+            vals_bt_, mse_bt_= torch.zeros([B, T], device=x_start.device), torch.zeros([B, T], device=x_start.device)
+            for t in reversed(range(T)):
+
+                t_b = torch.empty(B, dtype=torch.int64, device=x_start.device).fill_(t)
+                # Calculate VLB term at the current timestep
+                new_vals_b, pred_xstart = self._vb_terms_bpd(
+                    denoise_fn, data_start=x_start, data_t=self.q_sample(x_start=x_start, t=t_b), t=t_b,
+                    clip_denoised=clip_denoised, return_pred_xstart=True)
+                # MSE for progressive prediction loss
+                assert pred_xstart.shape == x_start.shape
+                new_mse_b = ((pred_xstart-x_start)**2).mean(dim=list(range(1, len(x_start.shape))))
+                assert new_vals_b.shape == new_mse_b.shape ==  torch.Size([B])
+                # Insert the calculated term into the tensor of all terms
+                mask_bt = t_b[:, None]==torch.arange(T, device=t_b.device)[None, :].float()
+                vals_bt_ = vals_bt_ * (~mask_bt) + new_vals_b[:, None] * mask_bt
+                mse_bt_ = mse_bt_ * (~mask_bt) + new_mse_b[:, None] * mask_bt
+                assert mask_bt.shape == vals_bt_.shape == vals_bt_.shape == torch.Size([B, T])
+
+            prior_bpd_b = self._prior_bpd(x_start)
+            total_bpd_b = vals_bt_.sum(dim=1) + prior_bpd_b
+            assert vals_bt_.shape == mse_bt_.shape == torch.Size([B, T]) and \
+                   total_bpd_b.shape == prior_bpd_b.shape ==  torch.Size([B])
+            return total_bpd_b.mean(), vals_bt_.mean(), prior_bpd_b.mean(), mse_bt_.mean()
+
 
 class PVCNN2(PVCNN2Base):
     sa_blocks = [
@@ -134,7 +331,7 @@ class PVCNN2(PVCNN2Base):
 class Model(nn.Module):
     def __init__(self, args, betas, loss_type: str, model_mean_type: str, model_var_type:str):
         super(Model, self).__init__()
-        self.flow = Flowmodel(args)
+        self.diffusion = GaussianDiffusion(betas, loss_type, model_mean_type, model_var_type)
 
         self.model = PVCNN2(num_classes=args.nc, 
                             embed_dim=args.embed_dim, 
@@ -142,24 +339,38 @@ class Model(nn.Module):
                             dropout=args.dropout, 
                             extra_feature_channels=1) #<--- energy. #NOTE maybe we can add the remaining features as extra channels?? 
 
+    def prior_kl(self, x0):
+        return self.diffusion._prior_bpd(x0)
+
+    def all_kl(self, x0, clip_denoised=True):
+        total_bpd_b, vals_bt, prior_bpd_b, mse_bt =  self.diffusion.calc_bpd_loop(self._denoise, x0, clip_denoised)
+
+        return {
+            'total_bpd_b': total_bpd_b,
+            'terms_bpd': vals_bt,
+            'prior_bpd_b': prior_bpd_b,
+            'mse_bt':mse_bt
+        }
+
 
     def _denoise(self, data, t):
         B, D,N= data.shape
         assert data.dtype == torch.float
+        #assert t.shape == torch.Size([B]) and t.dtype == torch.int64
+
         out = self.model(data, t)
 
         assert out.shape == torch.Size([B, D, N])
         return out
 
     def get_loss_iter(self, data, noises=None):
-
         B, D, N = data.shape
-        t = torch.randint(0, 1000, size=(B,), device=data.device)
+        t = torch.randint(0, self.diffusion.num_timesteps, size=(B,), device=data.device)
 
         if noises is not None:
             noises[t!=0] = torch.randn((t!=0).sum(), *noises.shape[1:]).to(noises)
 
-        losses = self.flow.p_losses(
+        losses = self.diffusion.p_losses(
             denoise_fn=self._denoise, data_start=data, t=t, noise=noises)
         assert losses.shape == t.shape == torch.Size([B])
         return losses
@@ -167,13 +378,13 @@ class Model(nn.Module):
     def gen_samples(self, shape, device, noise_fn=torch.randn,
                     clip_denoised=True,
                     keep_running=False):
-        return self.flow.p_sample_loop(self._denoise, shape=shape, device=device, noise_fn=noise_fn,
+        return self.diffusion.p_sample_loop(self._denoise, shape=shape, device=device, noise_fn=noise_fn,
                                             clip_denoised=clip_denoised,
                                             keep_running=keep_running)
 
     def gen_sample_traj(self, shape, device, freq, noise_fn=torch.randn,
                     clip_denoised=True,keep_running=False):
-        return self.flow.p_sample_loop_trajectory(self._denoise, shape=shape, device=device, noise_fn=noise_fn, freq=freq,
+        return self.diffusion.p_sample_loop_trajectory(self._denoise, shape=shape, device=device, noise_fn=noise_fn, freq=freq,
                                                        clip_denoised=clip_denoised,
                                                        keep_running=keep_running)
 
@@ -212,7 +423,7 @@ def get_betas(schedule_type, b_start, b_end, time_num):
 
 def get_dataset(dataroot, npoints,category, name='shapenet'):
     if name == 'shapenet':
-        train_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
+        tr_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
             categories=[category], split='train',
             tr_sample_size=npoints,
             te_sample_size=npoints,
@@ -221,7 +432,7 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
             normalize_per_shape=False,
             normalize_std_per_axis=False,
             random_subsample=True)
-        test_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
+        te_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
             categories=[category], split='val',
             tr_sample_size=npoints,
             te_sample_size=npoints,
@@ -233,7 +444,7 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
             all_points_std=tr_dataset.all_points_std,
         )
     elif name == 'g4':
-        
+            
         centroid_transform = CentroidNormalize()
         #minmax_transform = MinMaxNormalize(min_vals, max_vals)
 
@@ -243,24 +454,11 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
                             ])
 
         #dataset.transform = minmax_transform
-        dataset = LazyPklDataset(os.path.join(dataroot), transform=None)
-        # Define the split ratios
-        total_size = len(dataset)
-        num_train = int(total_size * 0.8)
-        num_val = total_size - num_train
-        lengths = [num_train, num_val]
-
-        RNG = torch.Generator().manual_seed(42)
-
-        # 2. Pass the generator to random_split
-        train_dataset, test_dataset = torch.utils.data.random_split(
-            dataset, 
-            lengths, 
-            generator=RNG  # This line makes the split reproducible
-        )
-        
+        tr_dataset = LazyPklDataset(os.path.join(dataroot), transform=None)
+        te_dataset = None
         #te_dataset = LazyPklDataset(os.path.join(dataroot, 'val'), transform
-    return train_dataset, test_dataset
+    return tr_dataset, te_dataset
+
 
 
 def get_dataloader(opt, train_dataset, test_dataset=None, collate_fn=None):
@@ -284,11 +482,11 @@ def get_dataloader(opt, train_dataset, test_dataset=None, collate_fn=None):
         test_sampler = None
 
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=opt.bs,sampler=train_sampler,
-                                                   shuffle=train_sampler is None, num_workers=int(opt.workers), drop_last=True, collate_fn=collate_fn )
+                                                   shuffle=train_sampler is None, num_workers=int(opt.workers), drop_last=True)
 
     if test_dataset is not None:
         test_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=opt.bs,sampler=test_sampler,
-                                                   shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=collate_fn)
+                                                   shuffle=False, num_workers=int(opt.workers), drop_last=False)
     else:
         test_dataloader = None
 
@@ -399,9 +597,9 @@ def train(gpu, opt, output_dir, noises_init):
     lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
 
     if opt.model != '':
-        ckpt = torch.load(opt.model)
+        ckpt = torch.load(opt.model, map_location='cpu')
         model.load_state_dict(ckpt['model_state'])
-        #optimizer.load_state_dict(ckpt['optimizer_state'])
+        optimizer.load_state_dict(ckpt['optimizer_state'])
 
     if opt.model != '':
         start_epoch = torch.load(opt.model)['epoch'] + 1
@@ -414,11 +612,13 @@ def train(gpu, opt, output_dir, noises_init):
 
 
     for epoch in range(start_epoch, opt.niter):
+
         if opt.distribution_type == 'multi':
             train_sampler.set_epoch(epoch)
+
         lr_scheduler.step(epoch)
 
-        for i, data in enumerate(dataloader):  
+        for i, data in enumerate(dataloader):
             if opt.dataname == 'g4':
                 x, energy, y, gap_pid, idx = data
                 # x_pc = x[:,:,:3]
@@ -428,11 +628,14 @@ def train(gpu, opt, output_dir, noises_init):
                 #                        None)
                 
                 x = x.transpose(1,2)
-                noises_batch = noises_init[idx].transpose(1,2)
-            elif opt.dataname == 'shapenet':      
+                noises_batch = noises_init[list(idx)].transpose(1,2)
+            elif opt.dataname == 'shapenet':
                 x = data['train_points'].transpose(1,2)
                 noises_batch = noises_init[data['idx']].transpose(1,2)
-            
+
+            '''
+            train diffusion
+            '''
 
             if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
                 x = x.cuda(gpu)
@@ -440,87 +643,29 @@ def train(gpu, opt, output_dir, noises_init):
             elif opt.distribution_type == 'single':
                 x = x.cuda()
                 noises_batch = noises_batch.cuda()
-            
-            loss = model.get_loss_iter(x, noises_batch).mean()
+            break
 
-            optimizer.zero_grad()
-            loss.backward()
-            #netpNorm, netgradNorm = getGradNorm(model)
-            #if opt.grad_clip is not None:
-            #    torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
-
-            optimizer.step()
-
-
-            if i % opt.print_freq == 0 and should_diag:
-
-                logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    '
-                             .format(
-                        epoch, opt.niter, i, len(dataloader),loss.item()
-                        ))
-
-
-        
-        if (epoch + 1) % opt.vizIter == 0 and should_diag:
+        if 1:
             logger.info('Generation: eval')
 
             model.eval()
-            #x = x
             with torch.no_grad():
 
-                x_gen_eval = model.gen_samples(new_x_chain(x, 25).shape, x.device, clip_denoised=False)
-                x_gen_list = model.gen_sample_traj(new_x_chain(x, 1).shape, x.device, freq=40, clip_denoised=False)
-                x_gen_all = torch.cat(x_gen_list, dim=0)
+                x0 = []
+                x1 = []
+                for i in range(100):
+                    x_gen_eval = model.gen_samples(new_x_chain(x, 64).shape, x.device, clip_denoised=False)
+                    x0.append(x_gen_eval[0])
+                    x1.append(x_gen_eval[1])
 
-                gen_stats = [x_gen_eval.mean(), x_gen_eval.std()]
-                gen_eval_range = [x_gen_eval.min().item(), x_gen_eval.max().item()]
+                    print('Training Step', i)
 
-                logger.info('      [{:>3d}/{:>3d}]  '
-                             'eval_gen_range: [{:>10.4f}, {:>10.4f}]     '
-                             'eval_gen_stats: [mean={:>10.4f}, std={:>10.4f}]      '
-                    .format(
-                    epoch, opt.niter,
-                    *gen_eval_range, *gen_stats,
-                ))
+                x0 = torch.cat(x0, 0)
+                x1 = torch.cat(x1, 0)
+                # This should be parallely sampled with 8 GPUs in practice , here we only use one as example
+                torch.save([x0, x1], f'G4_reflow_DATASET.pth')
 
-            visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                                       x_gen_eval.transpose(1, 2), None, None,
-                                       None)
-
-            visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
-                                       x_gen_all.transpose(1, 2), None,
-                                       None,
-                                       None)
-
-            visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x.transpose(1, 2), None,
-                                       None,
-                                       None)
-
-            logger.info('Generation: train')
-            model.train()
-
-
-
-
-        if (epoch + 1) % opt.saveIter == 0:
-
-            if should_diag:
-
-
-                save_dict = {
-                    'epoch': epoch,
-                    'model_state': model.state_dict(),
-                    'optimizer_state': optimizer.state_dict()
-                }
-
-                torch.save(save_dict, '%s/epoch_%d.pth' % (output_dir, epoch))
-
-
-            if opt.distribution_type == 'multi':
-                dist.barrier()
-                map_location = {'cuda:%d' % 0: 'cuda:%d' % gpu}
-                model.load_state_dict(
-                    torch.load('%s/epoch_%d.pth' % (output_dir, epoch), map_location=map_location)['model_state'])
+                exit(0)
 
     dist.destroy_process_group()
 
@@ -539,7 +684,7 @@ def main():
     ''' workaround '''
     train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name =opt.dataname)
     noises_init = torch.randn(len(train_dataset), opt.npoints, opt.nc)
-    
+
     if opt.dist_url == "env://" and opt.world_size == -1:
         opt.world_size = int(os.environ["WORLD_SIZE"])
 
@@ -555,16 +700,17 @@ def main():
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
+#parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     parser.add_argument('--category', default='car')
     parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
+
     parser.add_argument('--bs', type=int, default=36, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
-    parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
+    parser.add_argument('--niter', type=int, default=10000, help='number of epochs to train for')
 
-    parser.add_argument('--nc', type=int, default=4)
-    parser.add_argument('--npoints',  type=int, default=2048)
+    parser.add_argument('--nc', default=4)
+    parser.add_argument('--npoints', default=2048)
     '''model'''
     parser.add_argument('--beta_start', default=0.0001)
     parser.add_argument('--beta_end', default=0.02)
@@ -585,7 +731,7 @@ def parse_args():
     parser.add_argument('--grad_clip', type=float, default=None, help='weight decay for EBM')
     parser.add_argument('--lr_gamma', type=float, default=0.998, help='lr decay for EBM')
 
-    parser.add_argument('--model', default='', help="path to model (to continue training)")
+    parser.add_argument('--model', default='./data/epoch_8431.pth', help="path to model (to continue training)")
 
 
     '''distributed'''
@@ -606,9 +752,9 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', default=100, help='unit: epoch')
-    parser.add_argument('--diagIter', default=100, help='unit: epoch')
-    parser.add_argument('--vizIter', default=100, help='unit: epoch')
+    parser.add_argument('--saveIter', default=500, help='unit: epoch')
+    parser.add_argument('--diagIter', default=500, help='unit: epoch')
+    parser.add_argument('--vizIter', default=500, help='unit: epoch')
     parser.add_argument('--print_freq', default=50, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')

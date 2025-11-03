@@ -15,6 +15,7 @@ from tqdm import tqdm
 # Borrow from https://github.com/ThibaultGROUEIX/AtlasNet
 def distChamfer(a, b):
     x, y = a, b
+
     bs, num_points, points_dim = x.size()
     xx = torch.bmm(x, x.transpose(2, 1))
     yy = torch.bmm(y, y.transpose(2, 1))
@@ -79,7 +80,8 @@ def _pairwise_EMD_CD_(sample_pcs, ref_pcs, batch_size, accelerated_cd=True):
             ref_batch = ref_pcs[ref_b_start:ref_b_end]
 
             batch_size_ref = ref_batch.size(0)
-            sample_batch_exp = sample_batch.view(1, -1, 3).expand(batch_size_ref, -1, -1)
+            #FIXME is 4 the number of nc? (#NOTE it was 3 in shapenet ds)
+            sample_batch_exp = sample_batch.view(1, -1, 4).expand(batch_size_ref, -1, -1)
             sample_batch_exp = sample_batch_exp.contiguous()
 
             dl, dr = distChamfer(sample_batch_exp.cuda(), ref_batch.cuda())
@@ -228,7 +230,6 @@ def entropy_of_occupancy_grid(pclouds, grid_resolution, in_sphere=False, verbose
     if abs(np.max(pclouds)) > bound or abs(np.min(pclouds)) > bound:
         if verbose:
             warnings.warn('Point-clouds are not in unit cube.')
-
     if in_sphere and np.max(np.sqrt(np.sum(pclouds ** 2, axis=2))) > bound:
         if verbose:
             warnings.warn('Point-clouds are not in unit sphere.')

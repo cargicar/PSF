@@ -6,6 +6,7 @@ import open3d as o3d
 from torch.utils.data import Dataset
 import numpy as np
 import pickle
+import random
 from typing import List, Tuple
 
 class LazyPklDataset(Dataset):
@@ -14,15 +15,20 @@ class LazyPklDataset(Dataset):
     to avoid loading the entire dataset into memory at initialization.
     """
 
-    def __init__(self, data_dir, transform=None):
+    def __init__(self, data_dir, transform=None, reflow= False):
         self.data_dir = data_dir
         self.transform = transform
         # The core of lazy loading: a map from global index to (file_path, local_index)
         self.global_index_map: List[Tuple[str, int]] = []
+        self.reflow = reflow
         #FIXME Temporary
         self.pkl = False
         self.npy = False
         self._create_global_index_map()
+        if self.reflow:
+            reflow_data = torch.load('G4_reflow_DATASET_100.pth', map_location='cpu')
+            self.x0 = reflow_data[0]
+            self.x1 = reflow_data[1]
 
     def _create_global_index_map(self):
         """
@@ -49,7 +55,6 @@ class LazyPklDataset(Dataset):
                     
                     # Check the actual number of events in this file
                     num_showers = len(showers_array)
-                    
                     # Ensure data is released immediately after reading its length
                     del data 
 
@@ -59,6 +64,7 @@ class LazyPklDataset(Dataset):
                         
                 except (pickle.UnpicklingError, FileNotFoundError, KeyError, IndexError, TypeError) as e:
                     print(f"Error indexing file structure '{file_path}': {e}. Skipping file.")
+            print(f"Dataset indexed. Total events found: {len(self.global_index_map)}")
         elif self.npy:
             for file_path in file_paths_npy:
                 try:
@@ -81,7 +87,7 @@ class LazyPklDataset(Dataset):
                 except (FileNotFoundError, KeyError, IndexError, TypeError) as e:
                     print(f"Error indexing file structure '{file_path}': {e}. Skipping file.")        
 
-        print(f"Dataset indexed. Total events found: {len(self.global_index_map)}")
+            print(f"Dataset indexed. Total events found: {len(self.global_index_map)}")
 
     def __len__(self):
         """Returns the total number of individual events (showers) in the dataset."""
@@ -95,58 +101,66 @@ class LazyPklDataset(Dataset):
             
         # 1. Look up the file path and local index for the requested global index
         file_path, local_idx = self.global_index_map[idx]
-        
-        if self.pkl:
+
+        if self.reflow:
+            idx = random.randint(0, 1001) #FIXME num samples 1001 hardcoded
+            x0 = self.x0[idx, :, :]
+            x1 = self.x1[idx, :, :]
+            self.pkl = False
+            self.npy = False
+            return (x0, x1, 0.0, 0.0, idx)
+        else:
+            if self.pkl:
+                    
+                #Load the entire file (the I/O-heavy step, done only when needed)
+                with open(file_path, 'rb') as f:
+                    data = pickle.load(f)
+                    
+                # Extract the necessary data arrays (assuming they are single-element lists)
+                all_showers_in_file = data['showers'][0]
+                all_energies_in_file = data['energies'][0]
+                pid_in_file = data['pid'][0]
+                gap_pid_in_file = data['gap_pid'][0]
                 
-            #Load the entire file (the I/O-heavy step, done only when needed)
-            with open(file_path, 'rb') as f:
-                data = pickle.load(f)
+                # 3. Retrieve the specific sample (the "lazy" selection)
+                shower = all_showers_in_file[local_idx]
+                energy = all_energies_in_file[local_idx]
                 
-            # Extract the necessary data arrays (assuming they are single-element lists)
-            all_showers_in_file = data['showers'][0]
-            all_energies_in_file = data['energies'][0]
-            pid_in_file = data['pid'][0]
-            gap_pid_in_file = data['gap_pid'][0]
-            
-            # 3. Retrieve the specific sample (the "lazy" selection)
-            shower = all_showers_in_file[local_idx]
-            energy = all_energies_in_file[local_idx]
-            
-            # Since pid/gap_pid were replicated in the original dataset, 
-            # we assume the single scalar value applies to all showers in the file.
-            pid = pid_in_file 
-            gap_pid = gap_pid_in_file
+                # Since pid/gap_pid were replicated in the original dataset, 
+                # we assume the single scalar value applies to all showers in the file.
+                pid = pid_in_file 
+                gap_pid = gap_pid_in_file
 
-            # NOTE: Using hardcoded max/min
-            max_e = 1000000
-            min_e = 1000
+                # NOTE: Using hardcoded max/min
+                max_e = 1000000
+                min_e = 1000
+                
+                # Normalization
+                energy = (energy - min_e) / (max_e - min_e)
+            elif self.npy:
             
-            # Normalization
-            energy = (energy - min_e) / (max_e - min_e)
-        elif self.npy:
-        
-            data = np.load(file_path, mmap_mode='r')
-            # Extract the necessary data arrays (assuming they are single-element lists)
-            all_showers_in_file = data
+                data = np.load(file_path, mmap_mode='r')
+                # Extract the necessary data arrays (assuming they are single-element lists)
+                all_showers_in_file = data
+                
+                # 3. Retrieve the specific sample (the "lazy" selection)
+                shower = all_showers_in_file[local_idx]
+                energy = 0.0
+                pid = 0
+                gap_pid = 0
+            if self.transform:
+                shower = self.transform(shower)
+
+            # The showers data has shape (N_particles, 4)
+            shower = torch.from_numpy(shower).float()
             
-            # 3. Retrieve the specific sample (the "lazy" selection)
-            shower = all_showers_in_file[local_idx]
-            energy = 0.0
-            pid = 0
-            gap_pid = 0
-        if self.transform:
-            shower = self.transform(shower)
+            # The energy, pid, and gap_pid are scalars
+            energy = torch.tensor(energy).float()
+            pid = torch.tensor(pid).long()
+            gap_pid = torch.tensor(gap_pid).long()
 
-        # The showers data has shape (N_particles, 4)
-        shower = torch.from_numpy(shower).float()
-        
-        # The energy, pid, and gap_pid are scalars
-        energy = torch.tensor(energy).float()
-        pid = torch.tensor(pid).long()
-        gap_pid = torch.tensor(gap_pid).long()
-
-        # Return the tensors
-        return (shower, energy, pid, gap_pid, idx)
+            # Return the tensors
+            return (shower, energy, pid, gap_pid, idx)
 
 class PointCloudMasks(object):
     '''

@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data
 
-
 import argparse
 from torch.distributions import Normal
 
@@ -14,6 +13,7 @@ import torch.distributed as dist
 from datasets.shapenet_data_pc import ShapeNet15kPointClouds
 from datasets.g4_pc_dataset import LazyPklDataset
 from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
+
 
 class Flowmodel:
     def __init__(self, opt):
@@ -86,10 +86,10 @@ class Flowmodel:
         return imgs
 
     @torch.no_grad()
-    def sample_pairs(self, data, x0 = None):
+    def sample_pairs(self, x0 = None, x1 = None):
         if x0 is None:
             x0 = torch.randn_like(data)
-
+        data = x1
         z0 = x0
         t= torch.rand((data.shape[0], 1, 1)).to(data.device)
         inter_data = t * data + (1.-t) * z0
@@ -100,7 +100,9 @@ class Flowmodel:
         """
         Training loss calculation
         """
-        inter_data, t, target = self.sample_pairs(data_start)
+        x0, x1 = data_start
+        data_start = x1
+        inter_data, t, target = self.sample_pairs(x0 = x0, x1 = x1)
         t = t.squeeze()
         data_t = inter_data
         eps_recon = denoise_fn(data_t, t)
@@ -137,28 +139,26 @@ class Model(nn.Module):
         self.flow = Flowmodel(args)
 
         self.model = PVCNN2(num_classes=args.nc, 
-                            embed_dim=args.embed_dim, 
-                            use_att=args.attention,
+                            embed_dim=args.embed_dim,
+                              use_att=args.attention,
                             dropout=args.dropout, 
                             extra_feature_channels=1) #<--- energy. #NOTE maybe we can add the remaining features as extra channels?? 
 
 
     def _denoise(self, data, t):
         B, D,N= data.shape
-        assert data.dtype == torch.float
         out = self.model(data, t)
-
-        assert out.shape == torch.Size([B, D, N])
         return out
 
     def get_loss_iter(self, data, noises=None):
-
+        x0, x1 = data
+        data = x0
         B, D, N = data.shape
         t = torch.randint(0, 1000, size=(B,), device=data.device)
 
         if noises is not None:
             noises[t!=0] = torch.randn((t!=0).sum(), *noises.shape[1:]).to(noises)
-
+        data = [x0, x1]
         losses = self.flow.p_losses(
             denoise_fn=self._denoise, data_start=data, t=t, noise=noises)
         assert losses.shape == t.shape == torch.Size([B])
@@ -212,7 +212,7 @@ def get_betas(schedule_type, b_start, b_end, time_num):
 
 def get_dataset(dataroot, npoints,category, name='shapenet'):
     if name == 'shapenet':
-        train_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
+        tr_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
             categories=[category], split='train',
             tr_sample_size=npoints,
             te_sample_size=npoints,
@@ -221,7 +221,7 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
             normalize_per_shape=False,
             normalize_std_per_axis=False,
             random_subsample=True)
-        test_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
+        te_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
             categories=[category], split='val',
             tr_sample_size=npoints,
             te_sample_size=npoints,
@@ -243,24 +243,10 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
                             ])
 
         #dataset.transform = minmax_transform
-        dataset = LazyPklDataset(os.path.join(dataroot), transform=None)
-        # Define the split ratios
-        total_size = len(dataset)
-        num_train = int(total_size * 0.8)
-        num_val = total_size - num_train
-        lengths = [num_train, num_val]
-
-        RNG = torch.Generator().manual_seed(42)
-
-        # 2. Pass the generator to random_split
-        train_dataset, test_dataset = torch.utils.data.random_split(
-            dataset, 
-            lengths, 
-            generator=RNG  # This line makes the split reproducible
-        )
-        
+        tr_dataset = LazyPklDataset(os.path.join(dataroot), reflow= True, transform=None)
+        te_dataset = None
         #te_dataset = LazyPklDataset(os.path.join(dataroot, 'val'), transform
-    return train_dataset, test_dataset
+    return tr_dataset, te_dataset
 
 
 def get_dataloader(opt, train_dataset, test_dataset=None, collate_fn=None):
@@ -325,7 +311,7 @@ def train(gpu, opt, output_dir, noises_init):
 
     ''' data '''
     #NOTE passing here to read max_particles from the args. Look for a way to do it from dataset
-    def pad_collate_fn(batch, max_particles=opt.npoints):
+    def reflow_pad_collate_fn(batch, max_particles=opt.npoints):
         """
         Custom collate function to handle batches of showers with varying numbers of particles.
         It pads or truncates each shower to a fixed size and then stacks them.
@@ -336,10 +322,12 @@ def train(gpu, opt, output_dir, noises_init):
         Returns:
             A tuple of batched PyTorch tensors.
         """
-        showers_list, energies_list, pids_list, gap_pids_list, idx = zip(*batch)
-
-        padded_showers = []
-        for shower in showers_list:
+        
+        x0_list,  x1_list, energy, pids_list, idx = zip(*batch)
+        x0_padded_showers = []
+        x1_padded_showers = []
+        for shower in x0_list:
+            shower = shower.T
             num_particles = shower.shape[0]
             if num_particles > max_particles:
                 # Truncate if the number of particles exceeds the max
@@ -348,18 +336,31 @@ def train(gpu, opt, output_dir, noises_init):
                 # Pad with zeros if the number of particles is less than the max
                 padding = torch.zeros(max_particles - num_particles, shower.shape[1], dtype=shower.dtype, device=shower.device)
                 padded_shower = torch.cat([shower, padding], dim=0)
-            padded_showers.append(padded_shower)
+            x0_padded_showers.append(padded_shower)
+
+        for shower in x1_list:
+            shower = shower.T
+            num_particles = shower.shape[0]
+            if num_particles > max_particles:
+                # Truncate if the number of particles exceeds the max
+                padded_shower = shower[:max_particles]
+            else:
+                # Pad with zeros if the number of particles is less than the max
+                padding = torch.zeros(max_particles - num_particles, shower.shape[1], dtype=shower.dtype, device=shower.device)
+                padded_shower = torch.cat([shower, padding], dim=0)
+            x1_padded_showers.append(padded_shower)
 
         # Stack all tensors to create the batch
-        showers_batch = torch.stack(padded_showers, dim=0)
-        energies_batch = torch.stack(energies_list, dim=0)
-        pids_batch = torch.stack(pids_list, dim=0)
-        gap_pids_batch = torch.stack(gap_pids_list, dim=0)
-
-        return showers_batch, energies_batch, pids_batch, gap_pids_batch, idx
+        x0_showers_batch = torch.stack(x0_padded_showers, dim=0)
+        x1_showers_batch = torch.stack(x1_padded_showers, dim=0)
+        #energies_batch = torch.stack(energies_list, dim=0)
+        #pids_batch = torch.stack(pids_list, dim=0)
+        #gap_pids_batch = torch.stack(gap_pids_list, dim=0)
+        return x0_showers_batch, x1_showers_batch, 0.0, 0.0, idx
 
     train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
-    dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=pad_collate_fn)
+    dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=reflow_pad_collate_fn)
+
 
 
     '''
@@ -404,43 +405,43 @@ def train(gpu, opt, output_dir, noises_init):
         #optimizer.load_state_dict(ckpt['optimizer_state'])
 
     if opt.model != '':
-        start_epoch = torch.load(opt.model)['epoch'] + 1
+        start_epoch = 0
     else:
         start_epoch = 0
 
     def new_x_chain(x, num_chain):
         return torch.randn(num_chain, *x.shape[1:], device=x.device)
 
-
-
     for epoch in range(start_epoch, opt.niter):
+
         if opt.distribution_type == 'multi':
             train_sampler.set_epoch(epoch)
-        lr_scheduler.step(epoch)
 
-        for i, data in enumerate(dataloader):  
+        lr_scheduler.step(epoch)
+        for i, data in enumerate(dataloader):
             if opt.dataname == 'g4':
-                x, energy, y, gap_pid, idx = data
-                # x_pc = x[:,:,:3]
-                # outf_syn = f"/global/homes/c/ccardona/PSF"
-                # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                #                        x_pc, None, None,
-                #                        None)
+                x0, x1, y, gap_pid, idx = data
+                x0 = x0.transpose(1,2)
+                x1 = x1.transpose(1,2)
+                noises_batch = noises_init[list(idx)].transpose(1,2)
+            elif opt.dataname == 'shapenet':
                 
-                x = x.transpose(1,2)
-                noises_batch = noises_init[idx].transpose(1,2)
-            elif opt.dataname == 'shapenet':      
-                x = data['train_points'].transpose(1,2)
+                x0 = data['train_points0']
+                x1 = data['train_points1']
                 noises_batch = noises_init[data['idx']].transpose(1,2)
-            
+
+            '''
+            train diffusion
+            '''
 
             if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
-                x = x.cuda(gpu)
+                x0 = x0.cuda(gpu)
+                x1 = x1.cuda(gpu)
                 noises_batch = noises_batch.cuda(gpu)
             elif opt.distribution_type == 'single':
                 x = x.cuda()
                 noises_batch = noises_batch.cuda()
-            
+            x = [x0, x1]
             loss = model.get_loss_iter(x, noises_batch).mean()
 
             optimizer.zero_grad()
@@ -455,17 +456,17 @@ def train(gpu, opt, output_dir, noises_init):
             if i % opt.print_freq == 0 and should_diag:
 
                 logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    '
-                             .format(
-                        epoch, opt.niter, i, len(dataloader),loss.item()
+                            .format(
+                        epoch, opt.niter, i, len(dataloader),loss.item(),
                         ))
 
 
-        
+
         if (epoch + 1) % opt.vizIter == 0 and should_diag:
             logger.info('Generation: eval')
 
             model.eval()
-            #x = x
+            x = x1
             with torch.no_grad():
 
                 x_gen_eval = model.gen_samples(new_x_chain(x, 25).shape, x.device, clip_denoised=False)
@@ -537,9 +538,9 @@ def main():
     copy_source(__file__, output_dir)
 
     ''' workaround '''
-    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name =opt.dataname)
+    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category,  name =opt.dataname)
     noises_init = torch.randn(len(train_dataset), opt.npoints, opt.nc)
-    
+
     if opt.dist_url == "env://" and opt.world_size == -1:
         opt.world_size = int(os.environ["WORLD_SIZE"])
 
@@ -559,12 +560,13 @@ def parse_args():
     parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     parser.add_argument('--category', default='car')
     parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=36, help='input batch size')
-    parser.add_argument('--workers', type=int, default=16, help='workers')
-    parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
 
-    parser.add_argument('--nc', type=int, default=4)
-    parser.add_argument('--npoints',  type=int, default=2048)
+    parser.add_argument('--bs', type=int, default=96, help='input batch size')
+    parser.add_argument('--workers', type=int, default=16, help='workers')
+    parser.add_argument('--niter', type=int, default=10000, help='number of epochs to train for')
+
+    parser.add_argument('--nc', default=4)
+    parser.add_argument('--npoints', default=2048)
     '''model'''
     parser.add_argument('--beta_start', default=0.0001)
     parser.add_argument('--beta_end', default=0.02)
@@ -579,7 +581,7 @@ def parse_args():
     parser.add_argument('--model_mean_type', default='eps')
     parser.add_argument('--model_var_type', default='fixedsmall')
 
-    parser.add_argument('--lr', type=float, default=2e-4, help='learning rate for E, default=0.0002')
+    parser.add_argument('--lr', type=float, default=2e-5, help='learning rate for E, default=0.0002')
     parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
     parser.add_argument('--decay', type=float, default=0, help='weight decay for EBM')
     parser.add_argument('--grad_clip', type=float, default=None, help='weight decay for EBM')
@@ -609,7 +611,7 @@ def parse_args():
     parser.add_argument('--saveIter', default=100, help='unit: epoch')
     parser.add_argument('--diagIter', default=100, help='unit: epoch')
     parser.add_argument('--vizIter', default=100, help='unit: epoch')
-    parser.add_argument('--print_freq', default=50, help='unit: iter')
+    parser.add_argument('--print_freq', default=20, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
 

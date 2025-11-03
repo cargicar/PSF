@@ -11,6 +11,8 @@ from utils.visualize import *
 from model.pvcnn_generation import PVCNN2Base
 import torch.distributed as dist
 from datasets.shapenet_data_pc import ShapeNet15kPointClouds
+from datasets.g4_pc_dataset import LazyPklDataset
+from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
 
 
 class Flowmodel:
@@ -136,8 +138,11 @@ class Model(nn.Module):
         super(Model, self).__init__()
         self.flow = Flowmodel(args)
 
-        self.model = PVCNN2(num_classes=args.nc, embed_dim=args.embed_dim, use_att=args.attention,
-                            dropout=args.dropout, extra_feature_channels=0)
+        self.model = PVCNN2(num_classes=args.nc, 
+                            embed_dim=args.embed_dim,
+                              use_att=args.attention,
+                            dropout=args.dropout, 
+                            extra_feature_channels=1) #<--- energy. #NOTE maybe we can add the remaining features as extra channels?? 
 
 
     def _denoise(self, data, t):
@@ -205,31 +210,46 @@ def get_betas(schedule_type, b_start, b_end, time_num):
     return betas
 
 
-def get_dataset(dataroot, npoints,category):
-    tr_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
-        categories=[category], split='train',
-        tr_sample_size=npoints,
-        te_sample_size=npoints,
-        scale=1.,
-        reflow = True,
-        normalize_per_shape=False,
-        normalize_std_per_axis=False,
-        random_subsample=True)
-    te_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
-        categories=[category], split='val',
-        tr_sample_size=npoints,
-        te_sample_size=npoints,
-        scale=1.,
-        reflow = True,
-        normalize_per_shape=False,
-        normalize_std_per_axis=False,
-        all_points_mean=tr_dataset.all_points_mean,
-        all_points_std=tr_dataset.all_points_std,
-    )
+def get_dataset(dataroot, npoints,category, name='shapenet'):
+    if name == 'shapenet':
+        tr_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
+            categories=[category], split='train',
+            tr_sample_size=npoints,
+            te_sample_size=npoints,
+            scale=1.,
+            reflow = False,
+            normalize_per_shape=False,
+            normalize_std_per_axis=False,
+            random_subsample=True)
+        te_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
+            categories=[category], split='val',
+            tr_sample_size=npoints,
+            te_sample_size=npoints,
+            scale=1.,
+            reflow = False,
+            normalize_per_shape=False,
+            normalize_std_per_axis=False,
+            all_points_mean=tr_dataset.all_points_mean,
+            all_points_std=tr_dataset.all_points_std,
+        )
+    elif name == 'g4':
+        
+        centroid_transform = CentroidNormalize()
+        #minmax_transform = MinMaxNormalize(min_vals, max_vals)
+
+        composed_transform = Compose([
+                            centroid_transform,
+        #                    minmax_transform,
+                            ])
+
+        #dataset.transform = minmax_transform
+        tr_dataset = LazyPklDataset(os.path.join(dataroot), reflow= True, transform=None)
+        te_dataset = None
+        #te_dataset = LazyPklDataset(os.path.join(dataroot, 'val'), transform
     return tr_dataset, te_dataset
 
 
-def get_dataloader(opt, train_dataset, test_dataset=None):
+def get_dataloader(opt, train_dataset, test_dataset=None, collate_fn=None):
 
     if opt.distribution_type == 'multi':
         train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -250,11 +270,11 @@ def get_dataloader(opt, train_dataset, test_dataset=None):
         test_sampler = None
 
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=opt.bs,sampler=train_sampler,
-                                                   shuffle=train_sampler is None, num_workers=int(opt.workers), drop_last=True)
+                                                   shuffle=train_sampler is None, num_workers=int(opt.workers), drop_last=True, collate_fn=collate_fn )
 
     if test_dataset is not None:
         test_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=opt.bs,sampler=test_sampler,
-                                                   shuffle=False, num_workers=int(opt.workers), drop_last=False)
+                                                   shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=collate_fn)
     else:
         test_dataloader = None
 
@@ -290,8 +310,57 @@ def train(gpu, opt, output_dir, noises_init):
 
 
     ''' data '''
-    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category)
-    dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, None)
+    #NOTE passing here to read max_particles from the args. Look for a way to do it from dataset
+    def reflow_pad_collate_fn(batch, max_particles=opt.npoints):
+        """
+        Custom collate function to handle batches of showers with varying numbers of particles.
+        It pads or truncates each shower to a fixed size and then stacks them.
+
+        Args:
+            batch (list): A list of data samples from the dataset.
+            max_particles (int): The maximum number of particles to keep per shower.
+        Returns:
+            A tuple of batched PyTorch tensors.
+        """
+        
+        x0_list,  x1_list, energy, pids_list, idx = zip(*batch)
+        x0_padded_showers = []
+        x1_padded_showers = []
+        for shower in x0_list:
+            shower = shower.T
+            num_particles = shower.shape[0]
+            if num_particles > max_particles:
+                # Truncate if the number of particles exceeds the max
+                padded_shower = shower[:max_particles]
+            else:
+                # Pad with zeros if the number of particles is less than the max
+                padding = torch.zeros(max_particles - num_particles, shower.shape[1], dtype=shower.dtype, device=shower.device)
+                padded_shower = torch.cat([shower, padding], dim=0)
+            x0_padded_showers.append(padded_shower)
+
+        for shower in x1_list:
+            shower = shower.T
+            num_particles = shower.shape[0]
+            if num_particles > max_particles:
+                # Truncate if the number of particles exceeds the max
+                padded_shower = shower[:max_particles]
+            else:
+                # Pad with zeros if the number of particles is less than the max
+                padding = torch.zeros(max_particles - num_particles, shower.shape[1], dtype=shower.dtype, device=shower.device)
+                padded_shower = torch.cat([shower, padding], dim=0)
+            x1_padded_showers.append(padded_shower)
+
+        # Stack all tensors to create the batch
+        x0_showers_batch = torch.stack(x0_padded_showers, dim=0)
+        x1_showers_batch = torch.stack(x1_padded_showers, dim=0)
+        #energies_batch = torch.stack(energies_list, dim=0)
+        #pids_batch = torch.stack(pids_list, dim=0)
+        #gap_pids_batch = torch.stack(gap_pids_list, dim=0)
+        return x0_showers_batch, x1_showers_batch, 0.0, 0.0, idx
+
+    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
+    dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=reflow_pad_collate_fn)
+
 
 
     '''
@@ -349,11 +418,17 @@ def train(gpu, opt, output_dir, noises_init):
             train_sampler.set_epoch(epoch)
 
         lr_scheduler.step(epoch)
-
         for i, data in enumerate(dataloader):
-            x0 = data['train_points0']
-            x1 = data['train_points1']
-            noises_batch = noises_init[data['idx']].transpose(1,2)
+            if opt.dataname == 'g4':
+                x0, x1, y, gap_pid, idx = data
+                x0 = x0.transpose(1,2)
+                x1 = x1.transpose(1,2)
+                noises_batch = noises_init[list(idx)].transpose(1,2)
+            elif opt.dataname == 'shapenet':
+                
+                x0 = data['train_points0']
+                x1 = data['train_points1']
+                noises_batch = noises_init[data['idx']].transpose(1,2)
 
             '''
             train diffusion
@@ -463,7 +538,7 @@ def main():
     copy_source(__file__, output_dir)
 
     ''' workaround '''
-    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category)
+    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category,  name =opt.dataname)
     noises_init = torch.randn(len(train_dataset), opt.npoints, opt.nc)
 
     if opt.dist_url == "env://" and opt.world_size == -1:
@@ -481,14 +556,16 @@ def main():
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
-    parser.add_argument('--category', default='chair')
+    #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
+    parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
+    parser.add_argument('--category', default='car')
+    parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
 
     parser.add_argument('--bs', type=int, default=96, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=10000, help='number of epochs to train for')
 
-    parser.add_argument('--nc', default=3)
+    parser.add_argument('--nc', default=4)
     parser.add_argument('--npoints', default=2048)
     '''model'''
     parser.add_argument('--beta_start', default=0.0001)
@@ -534,7 +611,7 @@ def parse_args():
     parser.add_argument('--saveIter', default=100, help='unit: epoch')
     parser.add_argument('--diagIter', default=100, help='unit: epoch')
     parser.add_argument('--vizIter', default=100, help='unit: epoch')
-    parser.add_argument('--print_freq', default=50, help='unit: iter')
+    parser.add_argument('--print_freq', default=20, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
 

@@ -181,7 +181,6 @@ def visualize_pointcloud(points, normals=None,
 def visualize_pointcloud_batch(path, pointclouds, pred_labels, labels, categories, vis_label=False, target=None,  elev=30, azim=225):
     batch_size = len(pointclouds)
     fig = plt.figure(figsize=(20,20))
-
     ncols = int(np.sqrt(batch_size))
     nrows = max(1, (batch_size-1) // ncols+1)
     for idx, pc in enumerate(pointclouds):
@@ -198,7 +197,7 @@ def visualize_pointcloud_batch(path, pointclouds, pred_labels, labels, categorie
         ax = fig.add_subplot(nrows, ncols, idx + 1, projection='3d')
         ax.scatter(pc[:, 0], pc[:, 2], pc[:, 1], c=colour, s=5)
         ax.view_init(elev=elev, azim=azim)
-        ax.axis('off')
+        #ax.axis('off')
         if vis_label:
             ax.set_title('GT: {0}\nPred: {1}'.format(label, pred))
 

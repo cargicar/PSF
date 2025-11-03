@@ -11,6 +11,8 @@ from utils.visualize import *
 from model.pvcnn_generation import PVCNN2Base
 import torch.distributed as dist
 from datasets.shapenet_data_pc import ShapeNet15kPointClouds
+from datasets.g4_pc_dataset import LazyPklDataset
+from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
 
 class GaussianDiffusion:
     def __init__(self,betas, loss_type, model_mean_type, model_var_type):
@@ -331,8 +333,11 @@ class Model(nn.Module):
         super(Model, self).__init__()
         self.diffusion = GaussianDiffusion(betas, loss_type, model_mean_type, model_var_type)
 
-        self.model = PVCNN2(num_classes=args.nc, embed_dim=args.embed_dim, use_att=args.attention,
-                            dropout=args.dropout, extra_feature_channels=0)
+        self.model = PVCNN2(num_classes=args.nc, 
+                            embed_dim=args.embed_dim, 
+                            use_att=args.attention,
+                            dropout=args.dropout, 
+                            extra_feature_channels=1) #<--- energy. #NOTE maybe we can add the remaining features as extra channels?? 
 
     def prior_kl(self, x0):
         return self.diffusion._prior_bpd(x0)
@@ -416,29 +421,47 @@ def get_betas(schedule_type, b_start, b_end, time_num):
     return betas
 
 
-def get_dataset(dataroot, npoints,category):
-    tr_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
-        categories=[category], split='train',
-        tr_sample_size=npoints,
-        te_sample_size=npoints,
-        scale=1.,
-        normalize_per_shape=False,
-        normalize_std_per_axis=False,
-        random_subsample=True)
-    te_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
-        categories=[category], split='val',
-        tr_sample_size=npoints,
-        te_sample_size=npoints,
-        scale=1.,
-        normalize_per_shape=False,
-        normalize_std_per_axis=False,
-        all_points_mean=tr_dataset.all_points_mean,
-        all_points_std=tr_dataset.all_points_std,
-    )
+def get_dataset(dataroot, npoints,category, name='shapenet'):
+    if name == 'shapenet':
+        tr_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
+            categories=[category], split='train',
+            tr_sample_size=npoints,
+            te_sample_size=npoints,
+            scale=1.,
+            reflow = False,
+            normalize_per_shape=False,
+            normalize_std_per_axis=False,
+            random_subsample=True)
+        te_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
+            categories=[category], split='val',
+            tr_sample_size=npoints,
+            te_sample_size=npoints,
+            scale=1.,
+            reflow = False,
+            normalize_per_shape=False,
+            normalize_std_per_axis=False,
+            all_points_mean=tr_dataset.all_points_mean,
+            all_points_std=tr_dataset.all_points_std,
+        )
+    elif name == 'g4':
+            
+        centroid_transform = CentroidNormalize()
+        #minmax_transform = MinMaxNormalize(min_vals, max_vals)
+
+        composed_transform = Compose([
+                            centroid_transform,
+        #                    minmax_transform,
+                            ])
+
+        #dataset.transform = minmax_transform
+        tr_dataset = LazyPklDataset(os.path.join(dataroot), transform=None)
+        te_dataset = None
+        #te_dataset = LazyPklDataset(os.path.join(dataroot, 'val'), transform
     return tr_dataset, te_dataset
 
 
-def get_dataloader(opt, train_dataset, test_dataset=None):
+
+def get_dataloader(opt, train_dataset, test_dataset=None, collate_fn=None):
 
     if opt.distribution_type == 'multi':
         train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -499,8 +522,42 @@ def train(gpu, opt, output_dir, noises_init):
 
 
     ''' data '''
-    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category)
-    dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, None)
+    #NOTE passing here to read max_particles from the args. Look for a way to do it from dataset
+    def pad_collate_fn(batch, max_particles=opt.npoints):
+        """
+        Custom collate function to handle batches of showers with varying numbers of particles.
+        It pads or truncates each shower to a fixed size and then stacks them.
+
+        Args:
+            batch (list): A list of data samples from the dataset.
+            max_particles (int): The maximum number of particles to keep per shower.
+        Returns:
+            A tuple of batched PyTorch tensors.
+        """
+        showers_list, energies_list, pids_list, gap_pids_list, idx = zip(*batch)
+
+        padded_showers = []
+        for shower in showers_list:
+            num_particles = shower.shape[0]
+            if num_particles > max_particles:
+                # Truncate if the number of particles exceeds the max
+                padded_shower = shower[:max_particles]
+            else:
+                # Pad with zeros if the number of particles is less than the max
+                padding = torch.zeros(max_particles - num_particles, shower.shape[1], dtype=shower.dtype, device=shower.device)
+                padded_shower = torch.cat([shower, padding], dim=0)
+            padded_showers.append(padded_shower)
+
+        # Stack all tensors to create the batch
+        showers_batch = torch.stack(padded_showers, dim=0)
+        energies_batch = torch.stack(energies_list, dim=0)
+        pids_batch = torch.stack(pids_list, dim=0)
+        gap_pids_batch = torch.stack(gap_pids_list, dim=0)
+
+        return showers_batch, energies_batch, pids_batch, gap_pids_batch, idx
+
+    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
+    dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=pad_collate_fn)
 
 
     '''
@@ -562,8 +619,19 @@ def train(gpu, opt, output_dir, noises_init):
         lr_scheduler.step(epoch)
 
         for i, data in enumerate(dataloader):
-            x = data['train_points'].transpose(1,2)
-            noises_batch = noises_init[data['idx']].transpose(1,2)
+            if opt.dataname == 'g4':
+                x, energy, y, gap_pid, idx = data
+                # x_pc = x[:,:,:3]
+                # outf_syn = f"/global/homes/c/ccardona/PSF"
+                # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
+                #                        x_pc, None, None,
+                #                        None)
+                
+                x = x.transpose(1,2)
+                noises_batch = noises_init[list(idx)].transpose(1,2)
+            elif opt.dataname == 'shapenet':
+                x = data['train_points'].transpose(1,2)
+                noises_batch = noises_init[data['idx']].transpose(1,2)
 
             '''
             train diffusion
@@ -585,7 +653,7 @@ def train(gpu, opt, output_dir, noises_init):
 
                 x0 = []
                 x1 = []
-                for i in range(200):
+                for i in range(100):
                     x_gen_eval = model.gen_samples(new_x_chain(x, 64).shape, x.device, clip_denoised=False)
                     x0.append(x_gen_eval[0])
                     x1.append(x_gen_eval[1])
@@ -595,7 +663,7 @@ def train(gpu, opt, output_dir, noises_init):
                 x0 = torch.cat(x0, 0)
                 x1 = torch.cat(x1, 0)
                 # This should be parallely sampled with 8 GPUs in practice , here we only use one as example
-                torch.save([x0, x1], f'DATASET.pth')
+                torch.save([x0, x1], f'G4_reflow_DATASET.pth')
 
                 exit(0)
 
@@ -614,7 +682,7 @@ def main():
     copy_source(__file__, output_dir)
 
     ''' workaround '''
-    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category)
+    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name =opt.dataname)
     noises_init = torch.randn(len(train_dataset), opt.npoints, opt.nc)
 
     if opt.dist_url == "env://" and opt.world_size == -1:
@@ -632,14 +700,16 @@ def main():
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/ShapeNetCore.v2.PC15k/')
-    parser.add_argument('--category', default='chair')
+#parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
+    parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
+    parser.add_argument('--category', default='car')
+    parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
 
-    parser.add_argument('--bs', type=int, default=50, help='input batch size')
+    parser.add_argument('--bs', type=int, default=36, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=10000, help='number of epochs to train for')
 
-    parser.add_argument('--nc', default=3)
+    parser.add_argument('--nc', default=4)
     parser.add_argument('--npoints', default=2048)
     '''model'''
     parser.add_argument('--beta_start', default=0.0001)

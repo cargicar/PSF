@@ -355,7 +355,7 @@ def train(gpu, opt, output_dir, noises_init):
 
         for i, data in enumerate(dataloader):            
             x = data['train_points'].transpose(1,2)
-            
+            breakpoint()
             noises_batch = noises_init[data['idx']].transpose(1,2)
 
 

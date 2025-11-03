@@ -244,21 +244,22 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
 
         #dataset.transform = minmax_transform
         dataset = LazyPklDataset(os.path.join(dataroot), transform=None)
-        # Define the split ratios
-        total_size = len(dataset)
-        num_train = int(total_size * 0.8)
-        num_val = total_size - num_train
-        lengths = [num_train, num_val]
+        #NOTE in case we want to do the splits in this form. Is cleaner to do it "in-house'"
+        # total_size = len(dataset)
+        # num_train = int(total_size * 0.8)
+        # num_val = total_size - num_train
+        # lengths = [num_train, num_val]
 
-        RNG = torch.Generator().manual_seed(42)
+        # RNG = torch.Generator().manual_seed(42)
 
-        # 2. Pass the generator to random_split
-        train_dataset, test_dataset = torch.utils.data.random_split(
-            dataset, 
-            lengths, 
-            generator=RNG  # This line makes the split reproducible
-        )
-        
+        # # 2. Pass the generator to random_split
+        # train_dataset, test_dataset = torch.utils.data.random_split(
+        #     dataset, 
+        #     lengths, 
+        #     generator=RNG  # This line makes the split reproducible
+        # )
+        train_dataset = dataset
+        test_dataset = None
         #te_dataset = LazyPklDataset(os.path.join(dataroot, 'val'), transform
     return train_dataset, test_dataset
 
@@ -428,7 +429,7 @@ def train(gpu, opt, output_dir, noises_init):
                 #                        None)
                 
                 x = x.transpose(1,2)
-                noises_batch = noises_init[idx].transpose(1,2)
+                noises_batch = noises_init[list(idx)].transpose(1,2)
             elif opt.dataname == 'shapenet':      
                 x = data['train_points'].transpose(1,2)
                 noises_batch = noises_init[data['idx']].transpose(1,2)

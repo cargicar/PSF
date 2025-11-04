@@ -10,103 +10,15 @@ from torch.distributions import Normal
 from utils.file_utils import *
 from utils.visualize import *
 from model.pvcnn_generation import PVCNN2Base
+from model.calopodit import DiT, DiTConfig
 import torch.distributed as dist
 from datasets.shapenet_data_pc import ShapeNet15kPointClouds
 from datasets.g4_pc_dataset import LazyPklDataset
 from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
-
-class Flowmodel:
-    def __init__(self, opt):
-        self.num_timesteps = opt.time_num
-        return
-
-    def p_mean(self, denoise_fn, data, t):
-
-        model_output = denoise_fn(data, t)
-
-        model_mean = data + model_output * 1. / self.num_timesteps
-
-        return model_mean
-
-
-    ''' samples '''
-
-    def p_sample(self, denoise_fn, data, t, noise_fn, clip_denoised=False, return_pred_xstart=False):
-        """
-        Sample from the model
-        """
-        model_mean = self.p_mean(denoise_fn, data=data, t=t)
-
-        return model_mean
-
-
-    def p_sample_loop(self, denoise_fn, shape, device,
-                      noise_fn=torch.randn, clip_denoised=True, keep_running=False):
-        """
-        Generate samples
-        keep_running: True if we run 2 x num_timesteps, False if we just run num_timesteps
-
-        """
-
-        assert isinstance(shape, (tuple, list))
-        img_t = noise_fn(size=shape, dtype=torch.float, device=device)
-        for t in range(self.num_timesteps):
-            t_ = torch.empty(shape[0], dtype=torch.int64, device=device).fill_(t)
-            img_t = self.p_sample(denoise_fn=denoise_fn, data=img_t,t=t_, noise_fn=noise_fn,
-                                  clip_denoised=clip_denoised, return_pred_xstart=False)
-
-        assert img_t.shape == shape
-        return img_t
-
-    def p_sample_loop_trajectory(self, denoise_fn, shape, device, freq,
-                                 noise_fn=torch.randn,clip_denoised=True, keep_running=False):
-        """
-        Generate samples, returning intermediate images
-        Useful for visualizing how denoised images evolve over time
-        Args:
-          repeat_noise_steps (int): Number of denoising timesteps in which the same noise
-            is used across the batch. If >= 0, the initial noise is the same for all batch elemements.
-        """
-        assert isinstance(shape, (tuple, list))
-
-        total_steps =  self.num_timesteps if not keep_running else len(self.betas)
-
-        img_t = noise_fn(size=shape, dtype=torch.float, device=device)
-        imgs = [img_t]
-        for t in range(self.num_timesteps):
-
-            t_ = torch.empty(shape[0], dtype=torch.int64, device=device).fill_(t)
-            img_t = self.p_sample(denoise_fn=denoise_fn, data=img_t, t=t_, noise_fn=noise_fn,
-                                  clip_denoised=clip_denoised,
-                                  return_pred_xstart=False)
-            if t % freq == 0 or t == total_steps-1:
-                imgs.append(img_t)
-
-        assert imgs[-1].shape == shape
-        return imgs
-
-    @torch.no_grad()
-    def sample_pairs(self, data, x0 = None):
-        if x0 is None:
-            x0 = torch.randn_like(data)
-
-        z0 = x0
-        t= torch.rand((data.shape[0], 1, 1)).to(data.device)
-        inter_data = t * data + (1.-t) * z0
-        target = data - z0
-        return inter_data, t * 999, target
-
-    def p_losses(self, denoise_fn, data_start, t, noise=None):
-        """
-        Training loss calculation
-        """
-        inter_data, t, target = self.sample_pairs(data_start)
-        t = t.squeeze()
-        data_t = inter_data
-        eps_recon = denoise_fn(data_t, t)
-        losses = ((target - eps_recon)**2).mean(dim=list(range(1, len(data_start.shape))))
-
-        return losses
+#from rectified_flow.models.dit import DiT, DiTConfig
+from rectified_flow.rectified_flow import RectifiedFlow
+from rectified_flow.samplers import EulerSampler
+from rectified_flow.samplers.base_sampler import Sampler
 
 class PVCNN2(PVCNN2Base):
     sa_blocks = [
@@ -129,62 +41,6 @@ class PVCNN2(PVCNN2Base):
             dropout=dropout, extra_feature_channels=extra_feature_channels,
             width_multiplier=width_multiplier, voxel_resolution_multiplier=voxel_resolution_multiplier
         )
-
-
-class Model(nn.Module):
-    def __init__(self, args, betas, loss_type: str, model_mean_type: str, model_var_type:str):
-        super(Model, self).__init__()
-        self.flow = Flowmodel(args)
-
-        self.model = PVCNN2(num_classes=args.nc, 
-                            embed_dim=args.embed_dim, 
-                            use_att=args.attention,
-                            dropout=args.dropout, 
-                            extra_feature_channels=1) #<--- energy. #NOTE maybe we can add the remaining features as extra channels?? 
-
-
-    def _denoise(self, data, t):
-        B, D,N= data.shape
-        assert data.dtype == torch.float
-        out = self.model(data, t)
-
-        assert out.shape == torch.Size([B, D, N])
-        return out
-
-    def get_loss_iter(self, data, noises=None):
-
-        B, D, N = data.shape
-        t = torch.randint(0, 1000, size=(B,), device=data.device)
-
-        if noises is not None:
-            noises[t!=0] = torch.randn((t!=0).sum(), *noises.shape[1:]).to(noises)
-
-        losses = self.flow.p_losses(
-            denoise_fn=self._denoise, data_start=data, t=t, noise=noises)
-        assert losses.shape == t.shape == torch.Size([B])
-        return losses
-
-    def gen_samples(self, shape, device, noise_fn=torch.randn,
-                    clip_denoised=True,
-                    keep_running=False):
-        return self.flow.p_sample_loop(self._denoise, shape=shape, device=device, noise_fn=noise_fn,
-                                            clip_denoised=clip_denoised,
-                                            keep_running=keep_running)
-
-    def gen_sample_traj(self, shape, device, freq, noise_fn=torch.randn,
-                    clip_denoised=True,keep_running=False):
-        return self.flow.p_sample_loop_trajectory(self._denoise, shape=shape, device=device, noise_fn=noise_fn, freq=freq,
-                                                       clip_denoised=clip_denoised,
-                                                       keep_running=keep_running)
-
-    def train(self):
-        self.model.train()
-
-    def eval(self):
-        self.model.eval()
-
-    def multi_gpu_wrapper(self, f):
-        self.model = f(self.model)
 
 
 def get_betas(schedule_type, b_start, b_end, time_num):
@@ -296,8 +152,40 @@ def get_dataloader(opt, train_dataset, test_dataset=None, collate_fn=None):
     return train_dataloader, test_dataloader, train_sampler, test_sampler
 
 
-def train(gpu, opt, output_dir, noises_init):
 
+def multi_gpu_wrapper(model, f):
+        return f(model)
+
+
+class MyEulerSamplerPVCNN(Sampler):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def step(self, **model_kwargs):
+        # Extract the current time, next time point, and current state
+        t, t_next, x_t = self.t, self.t_next, self.x_t
+        x_t = x_t.transpose(1,2)
+        # Compute the velocity field at the current state and time
+        v_t = self.rectified_flow.get_velocity(x_t=x_t, t=t, **model_kwargs)
+        v_t = v_t.transpose(1,2)
+        # Update the state using the Euler formula
+        self.x_t = self.x_t + (t_next - t) * v_t
+
+
+class MyEulerSampler(Sampler):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def step(self, **model_kwargs):
+        # Extract the current time, next time point, and current state
+        t, t_next, x_t = self.t, self.t_next, self.x_t
+        # Compute the velocity field at the current state and time
+        v_t = self.rectified_flow.get_velocity(x_t=x_t, t=t, **model_kwargs)
+        # Update the state using the Euler formula
+        self.x_t = self.x_t + (t_next - t) * v_t     
+
+def train(gpu, opt, output_dir, noises_init):
+    
     set_seed(opt)
     logger = setup_logging(output_dir)
     if opt.distribution_type == 'multi':
@@ -322,7 +210,6 @@ def train(gpu, opt, output_dir, noises_init):
         opt.saveIter =  int(opt.saveIter / opt.ngpus_per_node)
         opt.diagIter = int(opt.diagIter / opt.ngpus_per_node)
         opt.vizIter = int(opt.vizIter / opt.ngpus_per_node)
-
 
     ''' data '''
     #NOTE passing here to read max_particles from the args. Look for a way to do it from dataset
@@ -368,7 +255,38 @@ def train(gpu, opt, output_dir, noises_init):
     '''
 
     betas = get_betas(opt.schedule_type, opt.beta_start, opt.beta_end, opt.time_num)
-    model = Model(opt, betas, opt.loss_type, opt.model_mean_type, opt.model_var_type)
+    #model = Model(opt, betas, opt.loss_type, opt.model_mean_type, opt.model_var_type)
+
+    if opt.model_name == 'pvcnn2':
+        model = PVCNN2(num_classes=opt.nc, 
+                    embed_dim=opt.embed_dim, 
+                    use_att=opt.attention,
+                    dropout=opt.dropout, 
+                    extra_feature_channels=1) #<--- energy. #NOTE maybe we can add the remaining features as extra channels?? 
+    elif opt.model_name == 'calopodit':
+        #TODO clean up this config. Delet unused params and add new useful ones.
+        DiT_config = DiTConfig(
+            #Point transformer config
+            k = 16,
+            nblocks =  4,
+            name= "calopodit",
+            num_points = opt.npoints,
+            energy_cond = False,#opt.energy_cond,
+            in_features=opt.nc,
+            transformer_features = 128, #512 = hidden_size in current implementation
+            #DiT config
+            num_classes = 0, #opt.num_classes,
+            gap_classes = opt.gap_classes if hasattr(opt, 'gap_classes') else 0,
+            out_channels=4, #opt.out_channels,
+            hidden_size=128,
+            depth=13,
+            num_heads=8,
+            mlp_ratio=4,
+            use_long_skip=True,
+            final_conv=False,
+        )
+        model = DiT(DiT_config)
+    
 
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
         def _transform_(m):
@@ -377,14 +295,16 @@ def train(gpu, opt, output_dir, noises_init):
 
         torch.cuda.set_device(gpu)
         model.cuda(gpu)
-        model.multi_gpu_wrapper(_transform_)
+        #model.multi_gpu_wrapper(_transform_)
+        model = multi_gpu_wrapper(model, _transform_)
 
 
     elif opt.distribution_type == 'single':
         def _transform_(m):
             return nn.parallel.DataParallel(m)
         model = model.cuda()
-        model.multi_gpu_wrapper(_transform_)
+        #model.multi_gpu_wrapper(_transform_)
+        model = multi_gpu_wrapper(model, _transform_)
 
     elif gpu is not None:
         torch.cuda.set_device(gpu)
@@ -409,9 +329,22 @@ def train(gpu, opt, output_dir, noises_init):
     else:
         start_epoch = 0
 
-    def new_x_chain(x, num_chain):
-        return torch.randn(num_chain, *x.shape[1:], device=x.device)
-
+    # def new_x_chain(x, num_chain):
+    #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
+    #Rectified_Flow
+    data_shape = (opt.npoints ,opt.nc)  # (N, 4) 4 for (x,y,z,energy)
+    rectified_flow = RectifiedFlow(
+        data_shape=data_shape,
+        interp=opt.interp,
+        source_distribution=opt.source_distribution,
+        is_independent_coupling=opt.is_independent_coupling,
+        train_time_distribution=opt.train_time_distribution,
+        train_time_weight=opt.train_time_weight,
+        criterion=opt.criterion,
+        velocity_field=model,
+        #device=accelerator.device,
+        dtype=torch.float32,
+    )
 
 
     for epoch in range(start_epoch, opt.niter):
@@ -427,22 +360,46 @@ def train(gpu, opt, output_dir, noises_init):
                 # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
                 #                        x_pc, None, None,
                 #                        None)
-                
-                x = x.transpose(1,2)
-                noises_batch = noises_init[list(idx)].transpose(1,2)
-            elif opt.dataname == 'shapenet':      
-                x = data['train_points'].transpose(1,2)
-                noises_batch = noises_init[data['idx']].transpose(1,2)
+                if opt.model_name == "pvcnn2":
+                    x = x.transpose(1,2)
+                #noises_batch = noises_init[list(idx)].transpose(1,2)
+            elif opt.dataname == 'shapenet':
+                x = data['train_points']
+                if opt.model_name == "pvcnn2":      
+                    x = x.transpose(1,2)
+                #noises_batch = noises_init[data['idx']].transpose(1,2)
             
-
             if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
                 x = x.cuda(gpu)
-                noises_batch = noises_batch.cuda(gpu)
+                #noises_batch = noises_batch.cuda(gpu)
             elif opt.distribution_type == 'single':
                 x = x.cuda()
-                noises_batch = noises_batch.cuda()
+                #noises_batch = noises_batch.cuda()
             
-            loss = model.get_loss_iter(x, noises_batch).mean()
+            rectified_flow.device = x.device      
+            
+            x_0 = rectified_flow.sample_source_distribution(x.shape[0])
+            if opt.model_name == "pvcnn2":
+                x_0 = x_0.transpose(1,2)
+            t = rectified_flow.sample_train_time(x.shape[0])
+            t= t.squeeze()
+            #FIXME for now we will not use conditionals
+            loss = rectified_flow.get_loss(
+                        x_0=x_0,
+                        x_1=x,
+                        t=t,
+                    )
+    
+            # loss = rectified_flow.get_loss(
+            #             x_0=x_0,
+            #             x_1=x,
+            #             y= y,
+            #             gap= gap_pid,
+            #             energy=energy,
+            #             t=t,
+            #         )
+
+            #loss = model.get_loss_iter(x, noises_batch).mean()
 
             optimizer.zero_grad()
             loss.backward()
@@ -460,7 +417,7 @@ def train(gpu, opt, output_dir, noises_init):
                         epoch, opt.niter, i, len(dataloader),loss.item()
                         ))
 
-
+        
         
         if (epoch + 1) % opt.vizIter == 0 and should_diag:
             logger.info('Generation: eval')
@@ -468,40 +425,67 @@ def train(gpu, opt, output_dir, noises_init):
             model.eval()
             #x = x
             with torch.no_grad():
+                if opt.model_name == "pvcnn2":
+                    euler_sampler = MyEulerSamplerPVCNN(
+                        rectified_flow=rectified_flow,
+                        num_steps=opt.num_steps,
+                        num_samples=opt.sample_batch_size,
+                    )
+                
+                euler_sampler = MyEulerSampler(
+                        rectified_flow=rectified_flow,
+                        num_steps=opt.num_steps,
+                        num_samples=opt.sample_batch_size,
+                    )
+                    
+                # Sample method
+                #FIXME for now we will not use conditionals
+                traj1 = euler_sampler.sample_loop(seed=233)
+                # traj1 = euler_sampler.sample_loop(
+                #     seed=233,
+                #     y=y,
+                #     gap= gap_pid,
+                #     energy=energy,
+                #     )
+                pts= traj1.x_t
+                trajectory = traj1.trajectories
+                #Ehistogram(X,pts, y, gap_pid, energy, title=f"Ehist_calopodit_del")
+                #plot_batch_3d(pts, y, gaps=gap_pid, energies= energy, title = "Model sampler_G4")
 
-                x_gen_eval = model.gen_samples(new_x_chain(x, 25).shape, x.device, clip_denoised=False)
-                x_gen_list = model.gen_sample_traj(new_x_chain(x, 1).shape, x.device, freq=40, clip_denoised=False)
-                x_gen_all = torch.cat(x_gen_list, dim=0)
+                #cf = chamfer_distance(X, pts, squared=True)
+                #print(f"Chamfer Batch AVG Distance calopodit sampler: {cf.item():.6f}")
+        
 
-                gen_stats = [x_gen_eval.mean(), x_gen_eval.std()]
-                gen_eval_range = [x_gen_eval.min().item(), x_gen_eval.max().item()]
+                # x_gen_eval = model.gen_samples(new_x_chain(x, 25).shape, x.device, clip_denoised=False)
+                # x_gen_list = model.gen_sample_traj(new_x_chain(x, 1).shape, x.device, freq=40, clip_denoised=False)
+                # x_gen_all = torch.cat(x_gen_list, dim=0)
 
-                logger.info('      [{:>3d}/{:>3d}]  '
-                             'eval_gen_range: [{:>10.4f}, {:>10.4f}]     '
-                             'eval_gen_stats: [mean={:>10.4f}, std={:>10.4f}]      '
-                    .format(
-                    epoch, opt.niter,
-                    *gen_eval_range, *gen_stats,
-                ))
+                # gen_stats = [x_gen_eval.mean(), x_gen_eval.std()]
+                # gen_eval_range = [x_gen_eval.min().item(), x_gen_eval.max().item()]
+
+                # logger.info('      [{:>3d}/{:>3d}]  '
+                #              'eval_gen_range: [{:>10.4f}, {:>10.4f}]     '
+                #              'eval_gen_stats: [mean={:>10.4f}, std={:>10.4f}]      '
+                #     .format(
+                #     epoch, opt.niter,
+                #     *gen_eval_range, *gen_stats,
+                # ))
 
             visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                                       x_gen_eval.transpose(1, 2), None, None,
+                                       trajectory, None, None,
                                        None)
 
             visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
-                                       x_gen_all.transpose(1, 2), None,
+                                       pts, None,
                                        None,
                                        None)
 
-            visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x.transpose(1, 2), None,
-                                       None,
-                                       None)
+            # visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x.transpose(1,2), None,
+            #                            None,
+            #                            None)
 
             logger.info('Generation: train')
             model.train()
-
-
-
 
         if (epoch + 1) % opt.saveIter == 0:
 
@@ -556,21 +540,34 @@ def main():
 def parse_args():
 
     parser = argparse.ArgumentParser()
+    ''' Data '''
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     parser.add_argument('--category', default='car')
     parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=36, help='input batch size')
+    parser.add_argument('--bs', type=int, default=128, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
-
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)
+    
     '''model'''
+    parser.add_argument("--model_name", type=str, default="pvcnn2", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
     parser.add_argument('--beta_start', default=0.0001)
     parser.add_argument('--beta_end', default=0.02)
     parser.add_argument('--schedule_type', default='linear')
     parser.add_argument('--time_num', default=1000)
+    
+    '''Flow'''
+    parser.add_argument("--interp", type=str, default="straight", help="Interpolation method for the rectified flow. Choose between ['straight', 'slerp', 'ddim'].")
+    parser.add_argument("--source_distribution", type=str, default="normal", help="Distribution of the source samples. Choose between ['normal'].")
+    parser.add_argument("--is_independent_coupling", type=bool, default=True,help="Whether training 1-Rectified Flow")
+    parser.add_argument("--train_time_distribution", type=str, default="uniform", help="Distribution of the training time samples. Choose between ['uniform', 'lognormal', 'u_shaped'].")
+    parser.add_argument("--train_time_weight", type=str, default="uniform", help="Weighting of the training time samples. Choose between ['uniform'].")
+    parser.add_argument("--criterion", type=str, default="mse", help="Criterion for the rectified flow. Choose between ['mse', 'l1', 'lpips'].")
+    parser.add_argument("--num_steps", type=int, default=100, help=(
+            "Number of steps for generation. Used in training Reflow and/or evaluation"),)
+    parser.add_argument("--sample_batch_size", type=int, default=4, help="Batch size (per device) for sampling images.",)
 
     #params
     parser.add_argument('--attention', default=True)
@@ -607,10 +604,10 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', default=100, help='unit: epoch')
-    parser.add_argument('--diagIter', default=100, help='unit: epoch')
-    parser.add_argument('--vizIter', default=100, help='unit: epoch')
-    parser.add_argument('--print_freq', default=50, help='unit: iter')
+    parser.add_argument('--saveIter', default=80, help='unit: epoch')
+    parser.add_argument('--diagIter', default=80, help='unit: epoch')
+    parser.add_argument('--vizIter', default=80, help='unit: epoch')
+    parser.add_argument('--print_freq', default=10, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
 

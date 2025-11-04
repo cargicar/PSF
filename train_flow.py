@@ -355,10 +355,7 @@ def train(gpu, opt, output_dir, noises_init):
 
         for i, data in enumerate(dataloader):            
             x = data['train_points'].transpose(1,2)
-            breakpoint()
             noises_batch = noises_init[data['idx']].transpose(1,2)
-
-
             if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
                 x = x.cuda(gpu)
                 noises_batch = noises_batch.cuda(gpu)

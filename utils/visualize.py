@@ -179,6 +179,12 @@ def visualize_pointcloud(points, normals=None,
 
 
 def visualize_pointcloud_batch(path, pointclouds, pred_labels, labels, categories, vis_label=False, target=None,  elev=30, azim=225):
+    """"inputs:
+            path: path to save plot.
+            pointclouds: torch(sample_batch_size, npoints, nfeatures) 
+    """
+    if isinstance(pointclouds, list):
+        pointclouds = [item[0] for item in pointclouds]
     batch_size = len(pointclouds)
     fig = plt.figure(figsize=(20,20))
     ncols = int(np.sqrt(batch_size))

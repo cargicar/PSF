@@ -209,7 +209,6 @@ class PVCNN2Base(nn.Module):
 
     def get_timestep_embedding(self, timesteps, device):
         assert len(timesteps.shape) == 1  # and timesteps.dtype == tf.int32
-
         half_dim = self.embed_dim // 2
         emb = np.log(10000) / (half_dim - 1)
         emb = torch.from_numpy(np.exp(np.arange(0, half_dim) * -emb)).float().to(device)
@@ -223,9 +222,8 @@ class PVCNN2Base(nn.Module):
         return emb
 
     def forward(self, inputs, t):
-
-        temb =  self.embedf(self.get_timestep_embedding(t, inputs.device))[:,:,None].expand(-1,-1,inputs.shape[-1])
-
+        train_time = self.get_timestep_embedding(t, inputs.device)
+        temb =  self.embedf(train_time)[:,:,None].expand(-1,-1,inputs.shape[-1])
         # inputs : [B, in_channels + S, N]
         coords, features = inputs[:, :3, :].contiguous(), inputs
         coords_list, in_features_list = [], []

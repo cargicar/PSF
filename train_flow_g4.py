@@ -151,8 +151,6 @@ def get_dataloader(opt, train_dataset, test_dataset=None, collate_fn=None):
 
     return train_dataloader, test_dataloader, train_sampler, test_sampler
 
-
-
 def multi_gpu_wrapper(model, f):
         return f(model)
 
@@ -287,7 +285,6 @@ def train(gpu, opt, output_dir, noises_init):
         )
         model = DiT(DiT_config)
     
-
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
         def _transform_(m):
             return nn.parallel.DistributedDataParallel(

@@ -11,12 +11,17 @@ from torch.distributions import Normal
 from utils.file_utils import *
 from utils.visualize import *
 from model.pvcnn_generation import PVCNN2Base
+from model.calopodit import DiT, DiTConfig
 
 from tqdm import tqdm
 
 from datasets.shapenet_data_pc import ShapeNet15kPointClouds
 from datasets.g4_pc_dataset import LazyPklDataset
 from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
+from rectified_flow.rectified_flow import RectifiedFlow
+from rectified_flow.samplers import EulerSampler
+from rectified_flow.samplers.base_sampler import Sampler
+
 
 '''
 models
@@ -523,6 +528,39 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
     return train_dataset, test_dataset
 
 
+
+def multi_gpu_wrapper(model, f):
+        return f(model)
+
+
+class MyEulerSamplerPVCNN(Sampler):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def step(self, **model_kwargs):
+        # Extract the current time, next time point, and current state
+        t, t_next, x_t = self.t, self.t_next, self.x_t
+        x_t = x_t.transpose(1,2)
+        # Compute the velocity field at the current state and time
+        v_t = self.rectified_flow.get_velocity(x_t=x_t, t=t, **model_kwargs)
+        v_t = v_t.transpose(1,2)
+        # Update the state using the Euler formula
+        self.x_t = self.x_t + (t_next - t) * v_t
+
+
+class MyEulerSampler(Sampler):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def step(self, **model_kwargs):
+        # Extract the current time, next time point, and current state
+        t, t_next, x_t = self.t, self.t_next, self.x_t
+        # Compute the velocity field at the current state and time
+        v_t = self.rectified_flow.get_velocity(x_t=x_t, t=t, **model_kwargs)
+        # Update the state using the Euler formula
+        self.x_t = self.x_t + (t_next - t) * v_t     
+
+
 def evaluate_gen(opt, ref_pcs, logger):
     #NOTE passing here to read max_particles from the args. Look for a way to do it from dataset
     def pad_collate_fn(batch, max_particles=opt.npoints):
@@ -564,16 +602,15 @@ def evaluate_gen(opt, ref_pcs, logger):
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
                                                       shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=pad_collate_fn)
         #NOTE for debugging purposses 
-        subset_size = 2
+        subset_size = 32
         subset_indices = torch.randperm(len(test_dataset))[:subset_size]
         subset_dataset = torch.utils.data.Subset(test_dataset, subset_indices)
         subset_dataloader = torch.utils.data.DataLoader(subset_dataset, batch_size=opt.batch_size,
                                                       shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=pad_collate_fn) 
 
         ref = []
-        #for data in tqdm(test_dataloader, total=len(test_dataloader), desc='Generating Samples'):
-        breakpoint()
-        for data in tqdm(subset_dataloader, total=len(subset_dataloader), desc='Generating Samples'):
+        for data in tqdm(test_dataloader, total=len(test_dataloader), desc='Generating Samples'):
+        #for data in tqdm(subset_dataloader, total=len(subset_dataloader), desc='Generating Samples'):
             if opt.dataname == 'g4':
                 x, energy, y, gap_pid, idx = data
                 # x_pc = x[:,:,:3]
@@ -581,14 +618,14 @@ def evaluate_gen(opt, ref_pcs, logger):
                 # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
                 #                        x_pc, None, None,
                 #                        None)
-                
-                x = x.transpose(1,2)
+                if opt.model_name == 'pvcnn2':
+                    x = x.transpose(1,2)
+                #FIXME m and s hardcoded for debbuging
                 m=0
                 s=1
             elif opt.dataname == 'shapenet':      
                 x = data['test_points'].transpose(1,2)
                 m, s = data['mean'].float(), data['std'].float()
-
             ref.append(x*s + m)
 
         ref_pcs = torch.cat(ref, dim=0).contiguous()
@@ -602,7 +639,7 @@ def evaluate_gen(opt, ref_pcs, logger):
 
 
     # Compute metrics
-    results = compute_all_metrics(sample_pcs, ref_pcs, opt.batch_size)
+    results = compute_all_metrics(sample_pcs, ref_pcs, opt.bs)
     results = {k: (v.cpu().detach().item()
                    if not isinstance(v, float) else v) for k, v in results.items()}
 
@@ -612,13 +649,27 @@ def evaluate_gen(opt, ref_pcs, logger):
     if opt.dataname == 'g4':
         sample_pcs = sample_pcs[:,:,:3]
         ref_pcs = ref_pcs[:,:,:3]
-    jsd = JSD(sample_pcs.numpy(), ref_pcs.numpy())
+    jsd = JSD(sample_pcs.cpu().numpy(), ref_pcs.cpu().numpy())
     pprint('JSD: {}'.format(jsd))
     logger.info('JSD: {}'.format(jsd))
 
 
 
 def generate(model, opt):
+    #Rectified_Flow
+    data_shape = (opt.npoints ,opt.nc)  # (N, 4) 4 for (x,y,z,energy)
+    rectified_flow = RectifiedFlow(
+        data_shape=data_shape,
+        interp=opt.interp,
+        source_distribution=opt.source_distribution,
+        is_independent_coupling=opt.is_independent_coupling,
+        train_time_distribution=opt.train_time_distribution,
+        train_time_weight=opt.train_time_weight,
+        criterion=opt.criterion,
+        velocity_field=model,
+        #device=accelerator.device,
+        dtype=torch.float32,
+    )
 
     #NOTE passing here to read max_particles from the args. Look for a way to do it from dataset
     def pad_collate_fn(batch, max_particles=opt.npoints):
@@ -656,15 +707,35 @@ def generate(model, opt):
 
 
     _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
-    test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
+    test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.bs,
                                                       shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=pad_collate_fn)
 
     with torch.no_grad():
-
+        if opt.model_name == "pvcnn2":
+            euler_sampler = MyEulerSamplerPVCNN(
+                rectified_flow=rectified_flow,
+                num_steps=opt.num_steps,
+                num_samples=opt.sample_batch_size,
+            )
+        
+        euler_sampler = MyEulerSampler(
+                rectified_flow=rectified_flow,
+                num_steps=opt.num_steps,
+                num_samples=opt.sample_batch_size,
+            )
         samples = []
         ref = []
 
-        for i, data in tqdm(enumerate(test_dataloader), total=len(test_dataloader), desc='Generating Samples'):
+        #NOTE for debugging purposses 
+        subset_size = 32
+        subset_indices = torch.randperm(len(test_dataset))[:subset_size]
+        subset_dataset = torch.utils.data.Subset(test_dataset, subset_indices)
+        subset_dataloader = torch.utils.data.DataLoader(subset_dataset, batch_size=opt.bs,
+                                                      shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=pad_collate_fn) 
+
+    
+        #for i, data in tqdm(enumerate(test_dataloader), total=len(test_dataloader), desc='Generating Samples'):
+        for data in tqdm(subset_dataloader, total=len(subset_dataloader), desc='Generating Samples'): 
             if opt.dataname == 'g4':
                 x, energy, y, gap_pid, idx = data
                 # x_pc = x[:,:,:3]
@@ -672,21 +743,35 @@ def generate(model, opt):
                 # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
                 #                        x_pc, None, None,
                 #                        None)
-                
-                x = x.transpose(1,2)
+                if opt.model_name == 'pvcnn2':
+                    x = x.transpose(1,2)
+                #FIXME m and s hardcoded for debbuging
                 m=0
                 s=1
             elif opt.dataname == 'shapenet':      
-                x = data['test_points'].transpose(1,2)
+                x = data['test_points']
+                if opt.model_name == 'pvcnn2':
+                    x = x.transpose(1,2)
                 m, s = data['mean'].float(), data['std'].float()
-        
-            gen = model.gen_samples(x.shape,
-                                       'cuda', clip_denoised=False).detach().cpu()
-            
-            gen = gen.transpose(1,2).contiguous()
-            x = x.transpose(1,2).contiguous()
-
-
+            x= x.cuda()
+            rectified_flow.device = x.device      
+            # Sample method
+            #FIXME for now we will not use conditionals
+            traj1 = euler_sampler.sample_loop(seed=233)
+            # traj1 = euler_sampler.sample_loop(
+            #     seed=233,
+            #     y=y,
+            #     gap= gap_pid,
+            #     energy=energy,
+            #     )
+            gen = traj1.x_t.detach().cpu()
+            trajectory = traj1.trajectories            
+            # gen = model.gen_samples(x.shape,
+            #                            'cuda', clip_denoised=False).detach().cpu()
+            if opt.model_name == 'pvcnn2':
+                gen = gen.transpose(1,2).contiguous()
+            # gen = gen.transpose(1,2)
+            # x = x.transpose(1,2).contiguous()
 
             gen = gen * s + m
             x = x * s + m
@@ -698,7 +783,7 @@ def generate(model, opt):
                                        None, None)
 
         samples = torch.cat(samples, dim=0)
-        torch.save(samples, 'appendix_distill_samples_{}_{}.pth'.format(opt.category, opt.step))
+        torch.save(samples, 'appendix_distill_samples_{}_{}.pth'.format(opt.category, opt.num_steps))
         ref = torch.cat(ref, dim=0)
 
         torch.save(samples, opt.eval_path)
@@ -724,7 +809,38 @@ def main(opt):
     outf_syn, = setup_output_subdirs(output_dir, 'syn')
 
     betas = get_betas(opt.schedule_type, opt.beta_start, opt.beta_end, opt.time_num)
-    model = Model(opt, betas, opt.loss_type, opt.model_mean_type, opt.model_var_type)
+    #model = Model(opt, betas, opt.loss_type, opt.model_mean_type, opt.model_var_type)
+
+    if opt.model_name == 'pvcnn2':
+        model = PVCNN2(num_classes=opt.nc, 
+                    embed_dim=opt.embed_dim, 
+                    use_att=opt.attention,
+                    dropout=opt.dropout, 
+                    extra_feature_channels=1) #<--- energy. #NOTE maybe we can add the remaining features as extra channels?? 
+    elif opt.model_name == 'calopodit':
+        #TODO clean up this config. Delet unused params and add new useful ones.
+        DiT_config = DiTConfig(
+            #Point transformer config
+            k = 16,
+            nblocks =  4,
+            name= "calopodit",
+            num_points = opt.npoints,
+            energy_cond = False,#opt.energy_cond,
+            in_features=opt.nc,
+            transformer_features = 128, #512 = hidden_size in current implementation
+            #DiT config
+            num_classes = 0, #opt.num_classes,
+            gap_classes = opt.gap_classes if hasattr(opt, 'gap_classes') else 0,
+            out_channels=4, #opt.out_channels,
+            hidden_size=128,
+            depth=13,
+            num_heads=8,
+            mlp_ratio=4,
+            use_long_skip=True,
+            final_conv=False,
+        )
+        model = DiT(DiT_config)
+
 
     if opt.cuda:
         model.cuda()
@@ -733,7 +849,8 @@ def main(opt):
         return nn.parallel.DataParallel(m)
 
     model = model.cuda()
-    model.multi_gpu_wrapper(_transform_)
+    model = multi_gpu_wrapper(model, _transform_)
+    #model.multi_gpu_wrapper(_transform_)
 
     model.eval()
 
@@ -760,25 +877,37 @@ def main(opt):
 def parse_args():
 
     parser = argparse.ArgumentParser()
+    ''' Data '''
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     parser.add_argument('--category', default='car')
     parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
-    parser.add_argument('--step', type=int, default=1000)
-    parser.add_argument('--batch_size', type=int, default=50, help='input batch size')
+    parser.add_argument('--bs', type=int, default=128, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
-    parser.add_argument('--niter', type=int, default=10000, help='number of epochs to train for')
-
-    parser.add_argument('--generate',default=True)
-    parser.add_argument('--eval_gen', default=True)
-
-    parser.add_argument('--nc',  type=int, default=4)
-    parser.add_argument('--npoints', type=int, default=2048)
+    parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
+    parser.add_argument('--nc', type=int, default=4)
+    parser.add_argument('--npoints',  type=int, default=2048)
+    
     '''model'''
+    parser.add_argument("--model_name", type=str, default="pvcnn2", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
     parser.add_argument('--beta_start', default=0.0001)
     parser.add_argument('--beta_end', default=0.02)
     parser.add_argument('--schedule_type', default='linear')
     parser.add_argument('--time_num', default=1000)
+    
+    '''Flow'''
+    parser.add_argument("--interp", type=str, default="straight", help="Interpolation method for the rectified flow. Choose between ['straight', 'slerp', 'ddim'].")
+    parser.add_argument("--source_distribution", type=str, default="normal", help="Distribution of the source samples. Choose between ['normal'].")
+    parser.add_argument("--is_independent_coupling", type=bool, default=True,help="Whether training 1-Rectified Flow")
+    parser.add_argument("--train_time_distribution", type=str, default="uniform", help="Distribution of the training time samples. Choose between ['uniform', 'lognormal', 'u_shaped'].")
+    parser.add_argument("--train_time_weight", type=str, default="uniform", help="Weighting of the training time samples. Choose between ['uniform'].")
+    parser.add_argument("--criterion", type=str, default="mse", help="Criterion for the rectified flow. Choose between ['mse', 'l1', 'lpips'].")
+    parser.add_argument("--num_steps", type=int, default=1000, help=(
+            "Number of steps for generation. Used in training Reflow and/or evaluation"),)
+    parser.add_argument("--sample_batch_size", type=int, default=32, help="Batch size (per device) for sampling images.",)
+
+    parser.add_argument('--generate',default=True)
+    parser.add_argument('--eval_gen', default=True)
 
     #params
     parser.add_argument('--attention', default=True)
@@ -788,17 +917,40 @@ def parse_args():
     parser.add_argument('--model_mean_type', default='eps')
     parser.add_argument('--model_var_type', default='fixedsmall')
 
+    parser.add_argument('--lr', type=float, default=2e-4, help='learning rate for E, default=0.0002')
+    parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
+    parser.add_argument('--decay', type=float, default=0, help='weight decay for EBM')
+    parser.add_argument('--grad_clip', type=float, default=None, help='weight decay for EBM')
+    parser.add_argument('--lr_gamma', type=float, default=0.998, help='lr decay for EBM')
 
-    parser.add_argument('--model', default='',required=True, help="path to model (to continue training)")
+    parser.add_argument('--model', default='', help="path to model (to continue training)")
+
+
+    '''distributed'''
+    parser.add_argument('--world_size', default=1, type=int,
+                        help='Number of distributed nodes.')
+    parser.add_argument('--dist_url', default='tcp://127.0.0.1:9991', type=str,
+                        help='url used to set up distributed training')
+    parser.add_argument('--dist_backend', default='nccl', type=str,
+                        help='distributed backend')
+    parser.add_argument('--distribution_type', default='multi', choices=['multi', 'single', None],
+                        help='Use multi-processing distributed training to launch '
+                             'N processes per node, which has N GPUs. This is the '
+                             'fastest way to use PyTorch for either single node or '
+                             'multi node data parallel training')
+    parser.add_argument('--rank', default=0, type=int,
+                        help='node rank for distributed training')
+    parser.add_argument('--gpu', default=None, type=int,
+                        help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-
-    parser.add_argument('--eval_path',
-                        default='')
+    parser.add_argument('--saveIter', default=80, help='unit: epoch')
+    parser.add_argument('--diagIter', default=80, help='unit: epoch')
+    parser.add_argument('--vizIter', default=80, help='unit: epoch')
+    parser.add_argument('--print_freq', default=10, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
 
-    parser.add_argument('--gpu', type=int, default=0, metavar='S', help='gpu id (default: 0)')
 
     opt = parser.parse_args()
 
@@ -808,6 +960,7 @@ def parse_args():
         opt.cuda = False
 
     return opt
+
 if __name__ == '__main__':
     opt = parse_args()
     set_seed(opt)

@@ -609,8 +609,8 @@ def evaluate_gen(opt, ref_pcs, logger):
                                                       shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=pad_collate_fn) 
 
         ref = []
-        for data in tqdm(test_dataloader, total=len(test_dataloader), desc='Generating Samples'):
-        #for data in tqdm(subset_dataloader, total=len(subset_dataloader), desc='Generating Samples'):
+        #for data in tqdm(test_dataloader, total=len(test_dataloader), desc='Generating Samples'):
+        for data in tqdm(subset_dataloader, total=len(subset_dataloader), desc='Generating Samples'):
             if opt.dataname == 'g4':
                 x, energy, y, gap_pid, idx = data
                 # x_pc = x[:,:,:3]
@@ -717,12 +717,12 @@ def generate(model, opt):
                 num_steps=opt.num_steps,
                 num_samples=opt.sample_batch_size,
             )
-        
-        euler_sampler = MyEulerSampler(
-                rectified_flow=rectified_flow,
-                num_steps=opt.num_steps,
-                num_samples=opt.sample_batch_size,
-            )
+        else:
+            euler_sampler = MyEulerSampler(
+                    rectified_flow=rectified_flow,
+                    num_steps=opt.num_steps,
+                    num_samples=opt.sample_batch_size,
+                )
         samples = []
         ref = []
 
@@ -893,7 +893,7 @@ def parse_args():
     parser.add_argument('--beta_start', default=0.0001)
     parser.add_argument('--beta_end', default=0.02)
     parser.add_argument('--schedule_type', default='linear')
-    parser.add_argument('--time_num', default=1000)
+    parser.add_argument('--time_num', default=100)
     
     '''Flow'''
     parser.add_argument("--interp", type=str, default="straight", help="Interpolation method for the rectified flow. Choose between ['straight', 'slerp', 'ddim'].")

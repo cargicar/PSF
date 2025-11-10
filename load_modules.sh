@@ -26,6 +26,7 @@ fi
 # 3. Load the necessary system modules (GCC, CUDA, PyTorch)
 echo "Loading system module pytorch..."
 ml pytorch
+ml gcc
 
 # Check if the modules loaded successfully
 if [ $? -ne 0 ]; then

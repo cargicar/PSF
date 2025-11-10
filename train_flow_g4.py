@@ -343,7 +343,6 @@ def train(gpu, opt, output_dir, noises_init):
         dtype=torch.float32,
     )
 
-
     for epoch in range(start_epoch, opt.niter):
         if opt.distribution_type == 'multi':
             train_sampler.set_epoch(epoch)
@@ -428,13 +427,13 @@ def train(gpu, opt, output_dir, noises_init):
                         num_steps=opt.num_steps,
                         num_samples=opt.sample_batch_size,
                     )
-                
-                euler_sampler = MyEulerSampler(
-                        rectified_flow=rectified_flow,
-                        num_steps=opt.num_steps,
-                        num_samples=opt.sample_batch_size,
-                    )
-                    
+                else:
+                    euler_sampler = MyEulerSampler(
+                            rectified_flow=rectified_flow,
+                            num_steps=opt.num_steps,
+                            num_samples=opt.sample_batch_size,
+                        )
+                        
                 # Sample method
                 #FIXME for now we will not use conditionals
                 traj1 = euler_sampler.sample_loop(seed=233)
@@ -601,9 +600,9 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', default=80, help='unit: epoch')
-    parser.add_argument('--diagIter', default=80, help='unit: epoch')
-    parser.add_argument('--vizIter', default=80, help='unit: epoch')
+    parser.add_argument('--saveIter', default=100, help='unit: epoch')
+    parser.add_argument('--diagIter', default=100, help='unit: epoch')
+    parser.add_argument('--vizIter', default=100, help='unit: epoch')
     parser.add_argument('--print_freq', default=10, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')

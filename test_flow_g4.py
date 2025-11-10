@@ -628,6 +628,7 @@ def evaluate_gen(opt, ref_pcs, logger):
                 m, s = data['mean'].float(), data['std'].float()
             ref.append(x*s + m)
 
+        
         ref_pcs = torch.cat(ref, dim=0).contiguous()
 
     logger.info("Loading sample path: %s"
@@ -637,7 +638,9 @@ def evaluate_gen(opt, ref_pcs, logger):
     logger.info("Generation sample size:%s reference size: %s"
           % (sample_pcs.size(), ref_pcs.size()))
 
-
+    if opt.model_name == 'pvcnn2':
+        ref_pcs = ref_pcs.transpose(1,2)
+        sample_pcs = sample_pcs.transpose(1,2)
     # Compute metrics
     results = compute_all_metrics(sample_pcs, ref_pcs, opt.bs)
     results = {k: (v.cpu().detach().item()

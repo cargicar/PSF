@@ -538,7 +538,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     ''' Data '''
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
-    parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
+    parser.add_argument('--dataroot', default='/home/carlos/Rnet_local/datasets/G4_individual_sims_pkl_test')
     parser.add_argument('--category', default='car')
     parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--bs', type=int, default=128, help='input batch size')

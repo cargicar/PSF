@@ -26,3 +26,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("matchcost_forward", &MatchCostForward,"MatchCost forward (CUDA)");
     m.def("matchcost_backward", &MatchCostBackward,"MatchCost backward (CUDA)");
 }
+
+#endif

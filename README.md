@@ -32,6 +32,13 @@ install guideline [here](https://github.com/facebookresearch/pytorch3d/blob/main
 Install PyTorchEMD by
 ```
 cd metrics/PyTorchEMD
+conda install -c conda-forge gxx_linux-64=7.3.0 cuda-toolkit=10.1
+# Ensure the GPU architecture list is still set from the previous fix!
+export TORCH_CUDA_ARCH_LIST="3.5;5.0;6.0;6.1;7.0;7.5"
+pip install .
+# This sets the path for the C++ compiler (nvcc's host compiler)
+export CC=$CONDA_PREFIX/bin/gcc
+export CXX=$CONDA_PREFIX/bin/g++
 python setup.py install --user
 cp build/**/emd_cuda.cpython-36m-x86_64-linux-gnu.so .
 ```

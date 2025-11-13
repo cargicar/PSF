@@ -19,6 +19,8 @@ from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
 from rectified_flow.rectified_flow import RectifiedFlow
 from rectified_flow.samplers import EulerSampler
 from rectified_flow.samplers.base_sampler import Sampler
+from contextlib import contextmanager
+import torch.profiler
 
 class PVCNN2(PVCNN2Base):
     sa_blocks = [
@@ -153,6 +155,42 @@ def get_dataloader(opt, train_dataset, test_dataset=None, collate_fn=None):
 
 def multi_gpu_wrapper(model, f):
         return f(model)
+
+
+@contextmanager
+def profile(enable_profiling, record_shapes=True, tensor_board=True):
+    activities = [torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]
+    if enable_profiling:
+        tb_exec_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        if tensor_board:
+            with torch.profiler.profile(
+                activities=activities,
+                record_shapes=record_shapes,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(f"profiling/trace-{tb_exec_id}"),
+                profile_memory=True,
+                with_stack=True
+                ) as prof:
+                yield prof
+        else:
+            with profile(activities=activities, record_shapes=record_shapes) as prof:
+                yield prof
+    else:
+        yield None
+
+def profiler_table_output(prof):
+    profiler_table_output = prof.key_averages().table(
+        sort_by="self_cuda_memory_usage",
+        row_limit=10
+    )
+
+    # 2. Define the output file path
+    output_filename = "profiling/cuda_memory_profile.txt"
+
+    # 3. Write the string content to the file
+    with open(output_filename, "w") as f:
+        f.write(profiler_table_output)
+
+    print(f"Profiler table saved to {output_filename}")
 
 
 class MyEulerSamplerPVCNN(Sampler):
@@ -342,167 +380,175 @@ def train(gpu, opt, output_dir, noises_init):
         #device=accelerator.device,
         dtype=torch.float32,
     )
+    ##################################################################################
+    ''' training '''
+    ##################################################################################
+    profiling = opt.enable_profiling
+    with profile(profiling) as prof:
+        with torch.profiler.record_function("train_trace"):   
+            for epoch in range(start_epoch, opt.niter):
+                if opt.distribution_type == 'multi':
+                    train_sampler.set_epoch(epoch)
+                lr_scheduler.step(epoch)
 
-    for epoch in range(start_epoch, opt.niter):
-        if opt.distribution_type == 'multi':
-            train_sampler.set_epoch(epoch)
-        lr_scheduler.step(epoch)
-
-        for i, data in enumerate(dataloader):  
-            if opt.dataname == 'g4':
-                x, energy, y, gap_pid, idx = data
-                # x_pc = x[:,:,:3]
-                # outf_syn = f"/global/homes/c/ccardona/PSF"
-                # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                #                        x_pc, None, None,
-                #                        None)
-                if opt.model_name == "pvcnn2":
-                    x = x.transpose(1,2)
-                #noises_batch = noises_init[list(idx)].transpose(1,2)
-            elif opt.dataname == 'shapenet':
-                x = data['train_points']
-                if opt.model_name == "pvcnn2":      
-                    x = x.transpose(1,2)
-                #noises_batch = noises_init[data['idx']].transpose(1,2)
+                for i, data in enumerate(dataloader):  
+                    if opt.dataname == 'g4':
+                        x, energy, y, gap_pid, idx = data
+                        # x_pc = x[:,:,:3]
+                        # outf_syn = f"/global/homes/c/ccardona/PSF"
+                        # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
+                        #                        x_pc, None, None,
+                        #                        None)
+                        if opt.model_name == "pvcnn2":
+                            x = x.transpose(1,2)
+                        #noises_batch = noises_init[list(idx)].transpose(1,2)
+                    elif opt.dataname == 'shapenet':
+                        x = data['train_points']
+                        if opt.model_name == "pvcnn2":      
+                            x = x.transpose(1,2)
+                        #noises_batch = noises_init[data['idx']].transpose(1,2)
+                    
+                    if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
+                        x = x.cuda(gpu)
+                        #noises_batch = noises_batch.cuda(gpu)
+                    elif opt.distribution_type == 'single':
+                        x = x.cuda()
+                        #noises_batch = noises_batch.cuda()
+                    
+                    rectified_flow.device = x.device      
+                    
+                    x_0 = rectified_flow.sample_source_distribution(x.shape[0])
+                    if opt.model_name == "pvcnn2":
+                        x_0 = x_0.transpose(1,2)
+                    t = rectified_flow.sample_train_time(x.shape[0])
+                    t= t.squeeze()
+                    #FIXME for now we will not use conditionals
+                    loss = rectified_flow.get_loss(
+                                x_0=x_0,
+                                x_1=x,
+                                t=t,
+                            )
             
-            if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
-                x = x.cuda(gpu)
-                #noises_batch = noises_batch.cuda(gpu)
-            elif opt.distribution_type == 'single':
-                x = x.cuda()
-                #noises_batch = noises_batch.cuda()
-            
-            rectified_flow.device = x.device      
-            
-            x_0 = rectified_flow.sample_source_distribution(x.shape[0])
-            if opt.model_name == "pvcnn2":
-                x_0 = x_0.transpose(1,2)
-            t = rectified_flow.sample_train_time(x.shape[0])
-            t= t.squeeze()
-            #FIXME for now we will not use conditionals
-            loss = rectified_flow.get_loss(
-                        x_0=x_0,
-                        x_1=x,
-                        t=t,
-                    )
-    
-            # loss = rectified_flow.get_loss(
-            #             x_0=x_0,
-            #             x_1=x,
-            #             y= y,
-            #             gap= gap_pid,
-            #             energy=energy,
-            #             t=t,
-            #         )
+                    # loss = rectified_flow.get_loss(
+                    #             x_0=x_0,
+                    #             x_1=x,
+                    #             y= y,
+                    #             gap= gap_pid,
+                    #             energy=energy,
+                    #             t=t,
+                    #         )
 
-            #loss = model.get_loss_iter(x, noises_batch).mean()
+                    #loss = model.get_loss_iter(x, noises_batch).mean()
 
-            optimizer.zero_grad()
-            loss.backward()
-            #netpNorm, netgradNorm = getGradNorm(model)
-            #if opt.grad_clip is not None:
-            #    torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    #netpNorm, netgradNorm = getGradNorm(model)
+                    #if opt.grad_clip is not None:
+                    #    torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
 
-            optimizer.step()
+                    optimizer.step()
+                    if prof is not None:
+                        prof.step()
 
+                    if i % opt.print_freq == 0 and should_diag:
 
-            if i % opt.print_freq == 0 and should_diag:
+                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    '
+                                    .format(
+                                epoch, opt.niter, i, len(dataloader),loss.item()
+                                ))
 
-                logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    '
-                             .format(
-                        epoch, opt.niter, i, len(dataloader),loss.item()
-                        ))
+                
+                
+                if (epoch + 1) % opt.vizIter == 0 and should_diag:
+                    logger.info('Generation: eval')
 
-        
-        
-        if (epoch + 1) % opt.vizIter == 0 and should_diag:
-            logger.info('Generation: eval')
+                    model.eval()
+                    #x = x
+                    with torch.no_grad():
+                        if opt.model_name == "pvcnn2":
+                            euler_sampler = MyEulerSamplerPVCNN(
+                                rectified_flow=rectified_flow,
+                                num_steps=opt.num_steps,
+                                num_samples=opt.sample_batch_size,
+                            )
+                        else:
+                            euler_sampler = MyEulerSampler(
+                                    rectified_flow=rectified_flow,
+                                    num_steps=opt.num_steps,
+                                    num_samples=opt.sample_batch_size,
+                                )
+                                
+                        # Sample method
+                        #FIXME for now we will not use conditionals
+                        traj1 = euler_sampler.sample_loop(seed=233)
+                        # traj1 = euler_sampler.sample_loop(
+                        #     seed=233,
+                        #     y=y,
+                        #     gap= gap_pid,
+                        #     energy=energy,
+                        #     )
+                        pts= traj1.x_t
+                        trajectory = traj1.trajectories
+                        #Ehistogram(X,pts, y, gap_pid, energy, title=f"Ehist_calopodit_del")
+                        #plot_batch_3d(pts, y, gaps=gap_pid, energies= energy, title = "Model sampler_G4")
 
-            model.eval()
-            #x = x
-            with torch.no_grad():
-                if opt.model_name == "pvcnn2":
-                    euler_sampler = MyEulerSamplerPVCNN(
-                        rectified_flow=rectified_flow,
-                        num_steps=opt.num_steps,
-                        num_samples=opt.sample_batch_size,
-                    )
-                else:
-                    euler_sampler = MyEulerSampler(
-                            rectified_flow=rectified_flow,
-                            num_steps=opt.num_steps,
-                            num_samples=opt.sample_batch_size,
-                        )
-                        
-                # Sample method
-                #FIXME for now we will not use conditionals
-                traj1 = euler_sampler.sample_loop(seed=233)
-                # traj1 = euler_sampler.sample_loop(
-                #     seed=233,
-                #     y=y,
-                #     gap= gap_pid,
-                #     energy=energy,
-                #     )
-                pts= traj1.x_t
-                trajectory = traj1.trajectories
-                #Ehistogram(X,pts, y, gap_pid, energy, title=f"Ehist_calopodit_del")
-                #plot_batch_3d(pts, y, gaps=gap_pid, energies= energy, title = "Model sampler_G4")
+                        #cf = chamfer_distance(X, pts, squared=True)
+                        #print(f"Chamfer Batch AVG Distance calopodit sampler: {cf.item():.6f}")
+                
 
-                #cf = chamfer_distance(X, pts, squared=True)
-                #print(f"Chamfer Batch AVG Distance calopodit sampler: {cf.item():.6f}")
-        
+                        # x_gen_eval = model.gen_samples(new_x_chain(x, 25).shape, x.device, clip_denoised=False)
+                        # x_gen_list = model.gen_sample_traj(new_x_chain(x, 1).shape, x.device, freq=40, clip_denoised=False)
+                        # x_gen_all = torch.cat(x_gen_list, dim=0)
 
-                # x_gen_eval = model.gen_samples(new_x_chain(x, 25).shape, x.device, clip_denoised=False)
-                # x_gen_list = model.gen_sample_traj(new_x_chain(x, 1).shape, x.device, freq=40, clip_denoised=False)
-                # x_gen_all = torch.cat(x_gen_list, dim=0)
+                        # gen_stats = [x_gen_eval.mean(), x_gen_eval.std()]
+                        # gen_eval_range = [x_gen_eval.min().item(), x_gen_eval.max().item()]
 
-                # gen_stats = [x_gen_eval.mean(), x_gen_eval.std()]
-                # gen_eval_range = [x_gen_eval.min().item(), x_gen_eval.max().item()]
+                        # logger.info('      [{:>3d}/{:>3d}]  '
+                        #              'eval_gen_range: [{:>10.4f}, {:>10.4f}]     '
+                        #              'eval_gen_stats: [mean={:>10.4f}, std={:>10.4f}]      '
+                        #     .format(
+                        #     epoch, opt.niter,
+                        #     *gen_eval_range, *gen_stats,
+                        # ))
 
-                # logger.info('      [{:>3d}/{:>3d}]  '
-                #              'eval_gen_range: [{:>10.4f}, {:>10.4f}]     '
-                #              'eval_gen_stats: [mean={:>10.4f}, std={:>10.4f}]      '
-                #     .format(
-                #     epoch, opt.niter,
-                #     *gen_eval_range, *gen_stats,
-                # ))
+                    visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
+                                            trajectory, None, None,
+                                            None)
 
-            visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                                       trajectory, None, None,
-                                       None)
+                    visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
+                                            pts, None,
+                                            None,
+                                            None)
 
-            visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
-                                       pts, None,
-                                       None,
-                                       None)
+                    # visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x.transpose(1,2), None,
+                    #                            None,
+                    #                            None)
 
-            # visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x.transpose(1,2), None,
-            #                            None,
-            #                            None)
+                    logger.info('Generation: train')
+                    model.train()
 
-            logger.info('Generation: train')
-            model.train()
+                if (epoch + 1) % opt.saveIter == 0:
 
-        if (epoch + 1) % opt.saveIter == 0:
-
-            if should_diag:
+                    if should_diag:
 
 
-                save_dict = {
-                    'epoch': epoch,
-                    'model_state': model.state_dict(),
-                    'optimizer_state': optimizer.state_dict()
-                }
+                        save_dict = {
+                            'epoch': epoch,
+                            'model_state': model.state_dict(),
+                            'optimizer_state': optimizer.state_dict()
+                        }
 
-                torch.save(save_dict, '%s/epoch_%d.pth' % (output_dir, epoch))
+                        torch.save(save_dict, '%s/epoch_%d.pth' % (output_dir, epoch))
 
 
-            if opt.distribution_type == 'multi':
-                dist.barrier()
-                map_location = {'cuda:%d' % 0: 'cuda:%d' % gpu}
-                model.load_state_dict(
-                    torch.load('%s/epoch_%d.pth' % (output_dir, epoch), map_location=map_location)['model_state'])
-
+                    if opt.distribution_type == 'multi':
+                        dist.barrier()
+                        map_location = {'cuda:%d' % 0: 'cuda:%d' % gpu}
+                        model.load_state_dict(
+                            torch.load('%s/epoch_%d.pth' % (output_dir, epoch), map_location=map_location)['model_state'])
+    if gpu==0:
+        prof.export_memory_timeline("memory_timeline.html", device=f"cuda:{gpu}")
+    profiler_table_output(prof)
     dist.destroy_process_group()
 
 def main():
@@ -607,6 +653,8 @@ def parse_args():
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
 
+    '''profiling'''
+    parser.add_argument('--enable_profiling', action='store_true', help='Enable profiling during training.')
 
     opt = parser.parse_args()
 

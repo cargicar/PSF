@@ -158,7 +158,7 @@ def multi_gpu_wrapper(model, f):
 
 
 @contextmanager
-def profile(enable_profiling, record_shapes=True, tensor_board=True):
+def profile(enable_profiling, record_shapes=True, tensor_board=True, output_dir="profiling"):
     activities = [torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]
     if enable_profiling:
         tb_exec_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -166,7 +166,7 @@ def profile(enable_profiling, record_shapes=True, tensor_board=True):
             with torch.profiler.profile(
                 activities=activities,
                 record_shapes=record_shapes,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(f"profiling/trace-{tb_exec_id}"),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(f"{output_dir}/trace-{tb_exec_id}"),
                 profile_memory=True,
                 with_stack=True
                 ) as prof:
@@ -177,16 +177,12 @@ def profile(enable_profiling, record_shapes=True, tensor_board=True):
     else:
         yield None
 
-def profiler_table_output(prof):
+def profiler_table_output(prof, output_filename="profiling/cuda_memory_profile.txt"):
     profiler_table_output = prof.key_averages().table(
         sort_by="self_cuda_memory_usage",
         row_limit=10
     )
 
-    # 2. Define the output file path
-    output_filename = "profiling/cuda_memory_profile.txt"
-
-    # 3. Write the string content to the file
     with open(output_filename, "w") as f:
         f.write(profiler_table_output)
 
@@ -230,7 +226,9 @@ def train(gpu, opt, output_dir, noises_init):
         should_diag = True
     if should_diag:
         outf_syn, = setup_output_subdirs(output_dir, 'syn')
-
+    if opt.enable_profiling:
+        out_prof, = setup_output_subdirs(output_dir, 'profiling')
+     
     if opt.distribution_type == 'multi':
         if opt.dist_url == "env://" and opt.rank == -1:
             opt.rank = int(os.environ["RANK"])
@@ -384,7 +382,7 @@ def train(gpu, opt, output_dir, noises_init):
     ''' training '''
     ##################################################################################
     profiling = opt.enable_profiling
-    with profile(profiling) as prof:
+    with profile(profiling, output_dir=out_prof) as prof:
         with torch.profiler.record_function("train_trace"):   
             for epoch in range(start_epoch, opt.niter):
                 if opt.distribution_type == 'multi':
@@ -547,8 +545,9 @@ def train(gpu, opt, output_dir, noises_init):
                         model.load_state_dict(
                             torch.load('%s/epoch_%d.pth' % (output_dir, epoch), map_location=map_location)['model_state'])
     if gpu==0:
-        prof.export_memory_timeline("memory_timeline.html", device=f"cuda:{gpu}")
-    profiler_table_output(prof)
+        prof.export_memory_timeline(f"{out_prof}/memory_timeline.raw.json.gz", device=f"cuda:{gpu}")
+        prof.export_memory_timeline(f"{out_prof}/memory_timeline.html", device=f"cuda:{gpu}")
+    profiler_table_output(prof, output_filename=f"{out_prof}/cuda_memory_profile_rank{opt.rank}.txt")
     dist.destroy_process_group()
 
 def main():

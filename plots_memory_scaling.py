@@ -77,7 +77,7 @@ def _coalesce_timeline(timeline):
         return times, sizes
 
 
-def open_json_gz(file_path, device_str='cuda:0', title="CUDA Memory Timeline"):
+def open_json_gz(file_path, device_str='cuda:0', title=None):
 
     #try:
         #with gzip.open(file_path, 'rt', encoding='utf-8') as f:
@@ -92,6 +92,8 @@ def open_json_gz(file_path, device_str='cuda:0', title="CUDA Memory Timeline"):
         times -= t_min
         stacked = np.cumsum(sizes, axis=1) / 1024**3
         device = torch.device(device_str)
+        max_memory_allocated = torch.cuda.max_memory_allocated(device)
+        max_memory_reserved = torch.cuda.max_memory_reserved(device)
 
         # Plot memory timeline as stacked data
         fig = plt.figure(figsize=(20, 12), dpi=80)
@@ -106,7 +108,13 @@ def open_json_gz(file_path, device_str='cuda:0', title="CUDA Memory Timeline"):
         # Usually training steps are in magnitude of ms.
         axes.set_xlabel("Time (ms)")
         axes.set_ylabel("Memory (GB)")
-        
+        title = "\n\n".join(
+            ([title] if title else [])
+            + [
+                f"Max memory allocated: {max_memory_allocated / (1024**3):.2f} GiB \n"
+                f"Max memory reserved: {max_memory_reserved / (1024**3):.2f} GiB"
+            ]
+        )
         axes.set_title(title)
         
         fig.savefig("memory.png")
@@ -128,7 +136,10 @@ def parse_args():
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--file_path', default="output/train_flow_g4/2025-11-17_calopodit_2k/profiling/memory_timeline.raw.json.gz" )
+    #parser.add_argument('--file_path', default="output/train_flow_g4/2025-11-14-06-34-26/profiling/memory_timeline.raw.json.gz" )
+    """file_paths is a comma separated list of file paths to process"""
+    default = ["output/train_flow_g4/2025-11-14-06-34-26/profiling/memory_timeline.raw.json.gz" , ]
+    parser.add_argument('--file_paths', default="output/train_flow_g4/2025-11-14-06-34-26/profiling/memory_timeline.raw.json.gz" )
 
     args = parser.parse_args()
 

@@ -14,6 +14,9 @@ from model.calopodit import DiT, DiTConfig
 import torch.distributed as dist
 from datasets.shapenet_data_pc import ShapeNet15kPointClouds
 from datasets.g4_pc_dataset import LazyPklDataset
+#from datasets.idl_dataset import ECAL_Chunked_Dataset as IDLDataset
+from datasets.idl_dataset import LazyIDLDataset as IDLDataset
+
 from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
 #from rectified_flow.models.dit import DiT, DiTConfig
 from rectified_flow.rectified_flow import RectifiedFlow
@@ -119,6 +122,10 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
         train_dataset = dataset
         test_dataset = None
         #te_dataset = LazyPklDataset(os.path.join(dataroot, 'val'), transform
+    elif name == 'idl':
+        dataset = IDLDataset(dataroot)#, max_seq_length=npoints, ordering='spatial', material_list=["G4_W", "G4_Ta", "G4_Pb"], inference_mode=False)
+        train_dataset = dataset
+        test_dataset = None
     return train_dataset, test_dataset
 
 
@@ -382,15 +389,15 @@ def train(gpu, opt, output_dir, noises_init):
     ''' training '''
     ##################################################################################
     profiling = opt.enable_profiling
+    out_prof = None
     with profile(profiling, output_dir=out_prof) as prof:
         with torch.profiler.record_function("train_trace"):   
             for epoch in range(start_epoch, opt.niter):
                 if opt.distribution_type == 'multi':
                     train_sampler.set_epoch(epoch)
                 lr_scheduler.step(epoch)
-
-                for i, data in enumerate(dataloader):  
-                    if opt.dataname == 'g4':
+                for i, data in enumerate(dataloader):
+                    if opt.dataname == 'g4' or opt.dataname == 'idl':
                         x, energy, y, gap_pid, idx = data
                         # x_pc = x[:,:,:3]
                         # outf_syn = f"/global/homes/c/ccardona/PSF"
@@ -583,10 +590,11 @@ def parse_args():
     parser = argparse.ArgumentParser()
     ''' Data '''
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
-    parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
+    #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/Pb_Simulation/')
     parser.add_argument('--category', default='car')
     parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=128, help='input batch size')
+    parser.add_argument('--bs', type=int, default=200, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
@@ -645,10 +653,10 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', default=100, help='unit: epoch')
-    parser.add_argument('--diagIter', default=100, help='unit: epoch')
-    parser.add_argument('--vizIter', default=100, help='unit: epoch')
-    parser.add_argument('--print_freq', default=10, help='unit: iter')
+    parser.add_argument('--saveIter', default=8, help='unit: epoch')
+    parser.add_argument('--diagIter', default=8, help='unit: epoch')
+    parser.add_argument('--vizIter', default=8, help='unit: epoch')
+    parser.add_argument('--print_freq', default=8, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
 

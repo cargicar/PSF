@@ -797,7 +797,7 @@ def plot_ratios(ax_twin, features_list, bins, feature, labels, colors, mask, wei
 
         ratios = []
         for j in range(len(counts1)):
-            if counts2[j] == 0:
+            if counts2[j] == 0 or counts1[j] == 0:
                 ratios.append(np.nan)
             else:
                 ratios.append(counts2[j] / counts1[j])

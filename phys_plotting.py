@@ -2,6 +2,7 @@ import json
 import math
 import h5py
 import os
+import torch
 import awkward as ak
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -1865,24 +1866,26 @@ def decode_hits(tokens, energies, grid_size=30, SOS_token=0, EOS_token=27001,PAD
 
         
 
-def read_generated(file_path, material_list=["G4_W","G4_Ta"],num_showers=-1,material="G4_W"):
-    with h5py.File(file_path,"r") as h5file:
+def read_generated(file_path, material_list=["G4_Pb","G4_Ta"],num_showers=-1,material="G4_Pb"):
+
+
+    gen_dict = {
+        "x": [],
+        "y": [],
+        "z": [],
+        "energy": []
+    }
+    gen_tensor = torch.load(file_path[1])
+    data_dict = {
+        "x": [],
+        "y": [],
+        "z": [],
+        "energy": [],
+    }
+
+    with h5py.File(file_path[0],"r") as h5file:
         #showers = h5file['showers'][()]
         showers_idx = h5file.keys()
-
-        data_dict = {
-            "x": [],
-            "y": [],
-            "z": [],
-            "energy": [],
-        }
-
-        data_dict_truth = {
-            "x": [],
-            "y": [],
-            "z": [],
-            "energy": []
-        }
         if num_showers == -1:
             num_showers = len(showers_idx)
         
@@ -1895,39 +1898,44 @@ def read_generated(file_path, material_list=["G4_W","G4_Ta"],num_showers=-1,mate
             x, y, z= shower['indices'][()].T
             energy = shower['values'][()]
             mat = shower['material'][()]
-            #if mat != material:
-            #    continue
-            
+            if mat.decode('utf-8') != material:
+                continue
+            xg, yg, zg, eg = gen_tensor[i]
+        
             #xt,yt,zt,Et = decode_hits(spatial_truth,energy_truth)
             
             if i % 5000 == 0 or i == num_showers:
                 print(f"Shower #: {i}/{num_showers}, Material: {mat}")
 
-            data_dict["z"].append(x)
-            data_dict["x"].append(y)
-            data_dict["y"].append(z)
-            data_dict["energy"].append(E)
-            
+
+            gen_dict["z"].append(zg)
+            gen_dict["x"].append(xg)
+            gen_dict["y"].append(yg)
+            gen_dict["energy"].append(eg)
+
+            data_dict["z"].append(z)
+            data_dict["x"].append(x)
+            data_dict["y"].append(y)
+            data_dict["energy"].append(energy)
             # data_dict_truth["z"].append(xt)
             # data_dict_truth["x"].append(yt)
             # data_dict_truth["y"].append(zt)
             # data_dict_truth["energy"].append(Et)
 
-            if i == num_showers:
-                break
+        ak_array_truth = ak.Array(data_dict)
+        ak_array = ak.Array(gen_dict)
+        return ak_array, ak_array_truth
 
-        ak_array = ak.Array(data_dict)
-        ak_array_truth = ak.Array(data_dict_truth)
-        #return ak_array,ak_array_truth
-        return ak_array,ak_array
-
-def make_plots(file_path, material_list=["G4_W","G4_Ta"],num_showers=-1):
-    
+def make_plots(file_paths: list[str], #list containig file paths for simulation and generated data
+                material_list=["G4_Pb"],
+                num_showers=-1):
+    #filepath[0] : simulation data
+    #filepath[1] : generated data
     #os.makedirs("Plots",exist_ok=True)
     #filename = file_path.split("/")[-1][:-3]
 
     for material in material_list:
-        generated_features, ground_truth_features = read_generated(file_path, material_list, num_showers, material)
+        generated_features, ground_truth_features = read_generated(file_paths, material_list, num_showers, material)
         fig = plot_paper_plots(
             [ground_truth_features, generated_features],
             labels=["Ground Truth", "Generated"],
@@ -1942,7 +1950,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot generated showers vs ground truth")
     #parser.add_argument("--file_path", type=str, required=True, help="Path to the HDF5 file containing generated showers")
     parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/photon-shower-10_corrected_compressed.hdf5')
-    parser.add_argument("--num_showers", type=int, default=-1, help="Number of showers to process (-1 for all)")
+    parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2025-12-26-12-04-19/syn/photon_samples.pth')
+    parser.add_argument("--num_showers", type=int, default=2400, help="Number of showers to process (-1 for all)")
     args = parser.parse_args()
-
-    make_plots(args.dataroot, num_showers=args.num_showers)
+    filepaths = [args.dataroot, args.genroot]
+    make_plots(filepaths, num_showers=args.num_showers)

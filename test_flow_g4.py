@@ -1,4 +1,5 @@
 import torch
+import torch.multiprocessing as mp
 from pprint import pprint
 from metrics.evaluation_metrics import jsd_between_point_cloud_sets as JSD
 from metrics.evaluation_metrics import compute_all_metrics, EMD_CD
@@ -17,6 +18,7 @@ from tqdm import tqdm
 
 from datasets.shapenet_data_pc import ShapeNet15kPointClouds
 from datasets.g4_pc_dataset import LazyPklDataset
+from datasets.idl_dataset import LazyIDLDataset as IDLDataset
 from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
 from rectified_flow.rectified_flow import RectifiedFlow
 from rectified_flow.samplers import EulerSampler
@@ -474,7 +476,6 @@ def get_constrain_function(ground_truth, mask, eps, num_steps=1):
 
 
 #############################################################################
-
 def get_dataset(dataroot, npoints,category, name='shapenet'):
     if name == 'shapenet':
         train_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
@@ -509,23 +510,31 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
 
         #dataset.transform = minmax_transform
         dataset = LazyPklDataset(os.path.join(dataroot), transform=None)
-        # Define the split ratios
-        total_size = len(dataset)
-        num_train = int(total_size * 0.8)
-        num_val = total_size - num_train
-        lengths = [num_train, num_val]
+        #NOTE in case we want to do the splits in this form. Is cleaner to do it "in-house'"
+        # total_size = len(dataset)
+        # num_train = int(total_size * 0.8)
+        # num_val = total_size - num_train
+        # lengths = [num_train, num_val]
 
-        RNG = torch.Generator().manual_seed(42)
+        # RNG = torch.Generator().manual_seed(42)
 
-        # 2. Pass the generator to random_split
-        train_dataset, test_dataset = torch.utils.data.random_split(
-            dataset, 
-            lengths, 
-            generator=RNG  # This line makes the split reproducible
-        )
-        
+        # # 2. Pass the generator to random_split
+        # train_dataset, test_dataset = torch.utils.data.random_split(
+        #     dataset, 
+        #     lengths, 
+        #     generator=RNG  # This line makes the split reproducible
+        # )
+        train_dataset = dataset
+        test_dataset = None
         #te_dataset = LazyPklDataset(os.path.join(dataroot, 'val'), transform
+    elif name == 'idl':
+        dataset = IDLDataset(dataroot)#, max_seq_length=npoints, ordering='spatial', material_list=["G4_W", "G4_Ta", "G4_Pb"], inference_mode=False)
+        train_dataset = dataset
+        test_dataset = None
+        #FIXME
+        test_dataset = train_dataset
     return train_dataset, test_dataset
+
 
 
 
@@ -730,16 +739,19 @@ def generate(model, opt):
         ref = []
 
         #NOTE for debugging purposses 
-        subset_size = 32
-        subset_indices = torch.randperm(len(test_dataset))[:subset_size]
-        subset_dataset = torch.utils.data.Subset(test_dataset, subset_indices)
-        subset_dataloader = torch.utils.data.DataLoader(subset_dataset, batch_size=opt.bs,
+        #subset_size = 32
+        #subset_indices = torch.randperm(len(test_dataset))[:subset_size]
+        #subset_dataset = torch.utils.data.Subset(test_dataset, subset_indices)
+        # subset_dataloader = torch.utils.data.DataLoader(subset_dataset, batch_size=opt.bs,
+        #                                               shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=pad_collate_fn) 
+        dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.bs,
                                                       shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=pad_collate_fn) 
 
     
         #for i, data in tqdm(enumerate(test_dataloader), total=len(test_dataloader), desc='Generating Samples'):
-        for data in tqdm(subset_dataloader, total=len(subset_dataloader), desc='Generating Samples'): 
-            if opt.dataname == 'g4':
+        #for data in tqdm(subset_dataloader, total=len(subset_dataloader), desc='Generating Samples'): 
+        for data in tqdm(dataloader, total=len(dataloader), desc='Generating Samples'): 
+            if opt.dataname == 'g4' or opt.dataname == 'idl':
                 x, energy, y, gap_pid, idx = data
                 # x_pc = x[:,:,:3]
                 # outf_syn = f"/global/homes/c/ccardona/PSF"
@@ -882,7 +894,9 @@ def parse_args():
     parser = argparse.ArgumentParser()
     ''' Data '''
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
-    parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
+    #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
+    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/Pb_Simulation/')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/')
     parser.add_argument('--category', default='car')
     parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--bs', type=int, default=128, help='input batch size')
@@ -910,7 +924,7 @@ def parse_args():
     parser.add_argument("--sample_batch_size", type=int, default=32, help="Batch size (per device) for sampling images.",)
 
     parser.add_argument('--generate',default=True)
-    parser.add_argument('--eval_gen', default=True)
+    parser.add_argument('--eval_gen', default=False)
 
     #params
     parser.add_argument('--attention', default=True)

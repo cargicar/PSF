@@ -1541,7 +1541,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
                 "hits": np.arange(0, 29) + 0.5,
             }
         )
-
+    breakpoint()
     # Plotting (two figures)
     mpl.rcParams["xtick.labelsize"] = 15
     mpl.rcParams["ytick.labelsize"] = 15
@@ -1901,7 +1901,9 @@ def read_generated(file_path, material_list=["G4_Pb","G4_Ta"],num_showers=-1,mat
             if mat.decode('utf-8') != material:
                 continue
             xg, yg, zg, eg = gen_tensor[i]
-        
+            #eg_min = eg.min()
+            #eg_max = eg.max()
+            #eg = (eg - eg_min) / (eg_max - eg_min)   # Rescale to initial energy
             #xt,yt,zt,Et = decode_hits(spatial_truth,energy_truth)
             
             if i % 5000 == 0 or i == num_showers:
@@ -1921,7 +1923,7 @@ def read_generated(file_path, material_list=["G4_Pb","G4_Ta"],num_showers=-1,mat
             # data_dict_truth["x"].append(yt)
             # data_dict_truth["y"].append(zt)
             # data_dict_truth["energy"].append(Et)
-
+        
         ak_array_truth = ak.Array(data_dict)
         ak_array = ak.Array(gen_dict)
         return ak_array, ak_array_truth

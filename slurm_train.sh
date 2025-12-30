@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=train_flow_g4
 #SBATCH --nodes=1
-#SBATCH --time=08:00:00
+#SBATCH --time=10:00:00
 #SBATCH --constraint=gpu
 #SBATCH --gpus=4
 #SBATH --mem=16GB
@@ -15,4 +15,4 @@
 source load_modules.sh
 #srun torchrun --nproc_per_node=4 scripts/train_calopodit.py --dataset ShapeNetCore --num_classes 4 --gap_classes 0 --no_energy_cond --out_channels 3 --in_features 3 --max_particles 2000
 #python sample_flow.py --category airplane --model output/train_flow/2025-10-23-17-34-22/epoch_999.pth --distribution_type si
-python train_flow_g4.py --dataname idl --npoints 1000
+python train_flow_g4.py --dataname idl --npoints 1200 --model_name calopodit 

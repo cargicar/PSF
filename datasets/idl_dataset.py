@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import h5py
 from torch.utils.data import Dataset
 import numpy as np
@@ -163,24 +164,22 @@ class LazyIDLDataset(Dataset):
             self.x1 = reflow_data[1]
 
     def _create_global_index_map(self):
-        """
-        Scans all files to determine the total number of events and creates 
-        the global index map. This only reads file structure/metadata, NOT the heavy data.
-        """
-        file_paths = [os.path.join(self.data_dir, f) 
-                      for f in os.listdir(self.data_dir) if f.endswith('.hdf5') or f.endswith('.h5')]
-        
+        base_path = Path(self.data_dir)
+        # This finds all .h5/.hdf5 files in all subdirectories
+        file_paths = list(base_path.rglob("*.h5")) + list(base_path.rglob("*.hdf5"))
         for file_path in file_paths:
-            # Open the file temporarily to read the keys (metadata)
+            # NOTE we will save the Pb dataset to test transferability
+            if "Pb_Simulation" in str(file_path):
+                continue
             try:
                 with h5py.File(file_path, "r") as f:
+                    # The parent folder name acts as the category label
+                    #category = file_path.parent.name 
                     for key in f.keys():
-                        # The map now stores the file path AND the internal HDF5 key
-                        self.global_index_map.append((file_path, key))
+                        self.global_index_map.append((str(file_path), key))
             except Exception as e:
-                print(f"Error reading keys from {file_path}: {e}")
-        print(f"Dataset indexed. Total events found: {len(self.global_index_map)}")
-        
+                print(f"Error reading {file_path}: {e}")    
+        print(f"Dataset indexed. Total events found: {len(self.global_index_map)}")    
 
     def __len__(self):
         """Returns the total number of individual events (showers) in the dataset."""

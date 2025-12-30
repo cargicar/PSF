@@ -398,7 +398,7 @@ def train(gpu, opt, output_dir, noises_init):
                 lr_scheduler.step(epoch)
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
-                        x, energy, y, gap_pid, idx = data
+                        x, int_energy, y, gap_pid, idx = data
                         # x_pc = x[:,:,:3]
                         # outf_syn = f"/global/homes/c/ccardona/PSF"
                         # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
@@ -431,9 +431,12 @@ def train(gpu, opt, output_dir, noises_init):
                     loss = rectified_flow.get_loss(
                                 x_0=x_0,
                                 x_1=x,
+                                y= y,
+                                #gap= gap_pid,
+                                energy=int_energy,
                                 t=t,
                             )
-            
+
                     # loss = rectified_flow.get_loss(
                     #             x_0=x_0,
                     #             x_1=x,
@@ -591,10 +594,10 @@ def parse_args():
     ''' Data '''
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/Pb_Simulation/')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
     parser.add_argument('--category', default='car')
     parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=200, help='input batch size')
+    parser.add_argument('--bs', type=int, default=500, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)

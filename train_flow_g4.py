@@ -410,13 +410,13 @@ def train(gpu, opt, output_dir, noises_init):
                         # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
                         #                        x_pc, None, None,
                         #                        None)
-                        if opt.model_name == "pvcnn2":
-                            x = x.transpose(1,2)
+                        # if opt.model_name == "pvcnn2":
+                        #     x = x.transpose(1,2)
                         #noises_batch = noises_init[list(idx)].transpose(1,2)
                     elif opt.dataname == 'shapenet':
                         x = data['train_points']
-                        if opt.model_name == "pvcnn2":      
-                            x = x.transpose(1,2)
+                        # if opt.model_name == "pvcnn2":      
+                        #     x = x.transpose(1,2)
                         #noises_batch = noises_init[data['idx']].transpose(1,2)
                     
                     if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):

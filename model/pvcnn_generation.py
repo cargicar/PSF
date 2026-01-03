@@ -172,11 +172,13 @@ def create_pointnet2_fp_modules(fp_blocks, in_channels, sa_in_channels, embed_di
 class PVCNN2Base(nn.Module):
 
     def __init__(self, num_classes, embed_dim, use_att, dropout=0.1,
-                 extra_feature_channels=3, width_multiplier=1, voxel_resolution_multiplier=1):
+                 extra_feature_channels=3, width_multiplier=1, voxel_resolution_multiplier=1, num_gaps = 2):
         super().__init__()
         assert extra_feature_channels >= 0
         self.embed_dim = embed_dim
         self.in_channels = extra_feature_channels + 3
+        self.num_gaps = num_gaps
+        self.null_category = num_gaps
 
         sa_layers, sa_in_channels, channels_sa_features, _ = create_pointnet2_sa_components(
             sa_blocks=self.sa_blocks, extra_feature_channels=extra_feature_channels, with_se=True, embed_dim=embed_dim,
@@ -201,8 +203,18 @@ class PVCNN2Base(nn.Module):
                                           classifier=True, dim=2, width_multiplier=width_multiplier)
         self.classifier = nn.Sequential(*layers)
 
+        #NOTE New Embedding layer for gap_pid
+        self.gap_emb = nn.Embedding(num_gaps+1, embed_dim)
+
+        # self.embedf = nn.Sequential(
+        #     nn.Linear(embed_dim, embed_dim),
+        #     nn.LeakyReLU(0.1, inplace=True),
+        #     nn.Linear(embed_dim, embed_dim),
+        # )
+        # We will sum or concat them (time+gap). Concat is often more expressive.
+        # If concatenating, input_dim is embed_dim * 2
         self.embedf = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
+            nn.Linear(embed_dim * 2, embed_dim), 
             nn.LeakyReLU(0.1, inplace=True),
             nn.Linear(embed_dim, embed_dim),
         )
@@ -221,9 +233,38 @@ class PVCNN2Base(nn.Module):
         assert emb.shape == torch.Size([timesteps.shape[0], self.embed_dim])
         return emb
 
-    def forward(self, inputs, t):
-        train_time = self.get_timestep_embedding(t, inputs.device)
-        temb =  self.embedf(train_time)[:,:,None].expand(-1,-1,inputs.shape[-1])
+    def forward(self, inputs, t: torch.Tensor, y=None, gap=None, energy = None, mask = None, p_uncond = 0.1):
+        device = inputs.device
+        if inputs.shape[1] != self.in_channels:
+            inputs = inputs.transpose(1, 2).contiguous()
+        B, C, N = inputs.shape
+        train_time = self.get_timestep_embedding(t, device)
+        # Get Gap Embedding (Conditioning)
+
+        if gap is not None:
+            # Clone to avoid modifying original labels
+            effective_gap = gap.clone()
+            if self.training and p_uncond > 0:
+                # Randomly replace labels with the null_category index
+                gap_mask = torch.rand(gap.shape, device=device) < p_uncond
+                effective_gap[gap_mask] = self.null_category
+            
+            gap_embedding = self.gap_emb(effective_gap)
+        else:
+            # If no gap is provided at all, use the null token for everything
+            null_tokens = torch.full((inputs.shape[0],), self.null_category, device=device)
+            gap_embedding = self.gap_emb(null_tokens)
+        # Fuse embeddings (Concatenation)
+        combined_vis = torch.cat([train_time, gap_embedding], dim=1) # [B, embed_dim * 2]
+
+        #temb =  self.embedf(train_time)[:,:,None].expand(-1,-1,inputs.shape[-1])
+        # 4. Project to model's internal embed_dim
+        temb = self.embedf(combined_vis)[:, :, None].expand(-1, -1, inputs.shape[-1])
+
+        if mask is not None:
+        # mask is [B, N], make it [B, 1, N] for broadcasting
+            temb = temb * mask.unsqueeze(1).float()
+        
         # inputs : [B, in_channels + S, N]
         coords, features = inputs[:, :3, :].contiguous(), inputs
         coords_list, in_features_list = [], []

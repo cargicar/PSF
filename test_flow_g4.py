@@ -575,6 +575,31 @@ class MyEulerSampler(Sampler):
             mask = model_kwargs["mask"].unsqueeze(-1).to(self.x_t.device)
             self.x_t = self.x_t * mask
 
+#TODO implement conditional free guidance during inference
+@torch.no_grad()
+def sample_cfg(model, x_t, t, gap_labels, guidance_scale=3.0):
+    """
+    guidance_scale: 0.0 = unconditional, 1.0 = standard conditional, >1.0 = CFG
+    """
+    # 1. Create a "null" batch
+    null_labels = torch.full_like(gap_labels, model.null_category)
+    
+    # 2. Batch them together for efficiency
+    # Double the batch: [x_t, x_t] and [gap_labels, null_labels]
+    batched_x = torch.cat([x_t, x_t], dim=0)
+    batched_t = torch.cat([t, t], dim=0)
+    batched_gap = torch.cat([gap_labels, null_labels], dim=0)
+    
+    # 3. Predict noise (p_uncond=0 because we are manually providing the nulls)
+    model_output = model(batched_x, batched_t, gap=batched_gap, p_uncond=0.0)
+    
+    # 4. Split predictions
+    eps_cond, eps_uncond = torch.chunk(model_output, 2, dim=0)
+    
+    # 5. Extrapolate: eps = eps_uncond + s * (eps_cond - eps_uncond)
+    refined_noise = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+    
+    return refined_noise
 
 def evaluate_gen(opt, ref_pcs, logger):
     #NOTE passing here to read max_particles from the args. Look for a way to do it from dataset

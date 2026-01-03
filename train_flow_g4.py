@@ -24,6 +24,7 @@ from rectified_flow.samplers import EulerSampler
 from rectified_flow.samplers.base_sampler import Sampler
 from contextlib import contextmanager
 import torch.profiler
+from functools import partial
 
 class PVCNN2(PVCNN2Base):
     sa_blocks = [
@@ -222,6 +223,12 @@ class MyEulerSampler(Sampler):
         v_t = self.rectified_flow.get_velocity(x_t=x_t, t=t, **model_kwargs)
         # Update the state using the Euler formula
         self.x_t = self.x_t + (t_next - t) * v_t     
+        #NOTE: If using a mask, force the padded points 
+        # in self.x_t to stay at 0 so they don't drift during sampling
+        
+        if "mask" in model_kwargs and model_kwargs["mask"] is not None:
+            mask = model_kwargs["mask"].unsqueeze(-1).to(self.x_t.device)
+            self.x_t = self.x_t * mask
 
 def train(gpu, opt, output_dir, noises_init):
     
@@ -253,8 +260,7 @@ def train(gpu, opt, output_dir, noises_init):
         opt.vizIter = int(opt.vizIter / opt.ngpus_per_node)
 
     ''' data '''
-    #NOTE passing here to read max_particles from the args. Look for a way to do it from dataset
-    def pad_collate_fn(batch, max_particles=opt.npoints):
+    def pad_collate_fn(batch, max_particles=1000):
         """
         Custom collate function to handle batches of showers with varying numbers of particles.
         It pads or truncates each shower to a fixed size and then stacks them.
@@ -266,29 +272,28 @@ def train(gpu, opt, output_dir, noises_init):
             A tuple of batched PyTorch tensors.
         """
         showers_list, energies_list, pids_list, gap_pids_list, idx = zip(*batch)
-
-        padded_showers = []
-        for shower in showers_list:
+        nfeatures, dtype, device = showers_list[0].shape[1], showers_list[0].dtype, showers_list[0].device
+        
+        # Initialize tensors for padded data and masks
+        # (Batch_Size, Max_N, 3)
+        padded_batch = torch.zeros((len(showers_list), max_particles, nfeatures), dtype= dtype, device= device)
+        mask = torch.zeros((len(showers_list), max_particles), dtype=torch.bool, device= device)
+        
+        for i, shower in enumerate(showers_list):
             num_particles = shower.shape[0]
-            if num_particles > max_particles:
-                # Truncate if the number of particles exceeds the max
-                padded_shower = shower[:max_particles]
-            else:
-                # Pad with zeros if the number of particles is less than the max
-                padding = torch.zeros(max_particles - num_particles, shower.shape[1], dtype=shower.dtype, device=shower.device)
-                padded_shower = torch.cat([shower, padding], dim=0)
-            padded_showers.append(padded_shower)
+            padded_batch[i, :num_particles, :] = shower
+            mask[i, :num_particles] = True
+            
 
         # Stack all tensors to create the batch
-        showers_batch = torch.stack(padded_showers, dim=0)
         energies_batch = torch.stack(energies_list, dim=0)
         pids_batch = torch.stack(pids_list, dim=0)
         gap_pids_batch = torch.stack(gap_pids_list, dim=0)
 
-        return showers_batch, energies_batch, pids_batch, gap_pids_batch, idx
+        return padded_batch, mask, energies_batch, pids_batch, gap_pids_batch, idx
 
     train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
-    dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=pad_collate_fn)
+    dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=partial(pad_collate_fn, max_particles= train_dataset.max_particles))
 
 
     '''
@@ -316,7 +321,7 @@ def train(gpu, opt, output_dir, noises_init):
             in_features=opt.nc,
             transformer_features = 128, #512 = hidden_size in current implementation
             #DiT config
-            num_classes = 0, #opt.num_classes,
+            num_classes = opt.num_classes if hasattr(opt, 'num_classes') else 0,
             gap_classes = opt.gap_classes if hasattr(opt, 'gap_classes') else 0,
             out_channels=4, #opt.out_channels,
             hidden_size=128,
@@ -372,7 +377,7 @@ def train(gpu, opt, output_dir, noises_init):
     # def new_x_chain(x, num_chain):
     #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
     #Rectified_Flow
-    data_shape = (opt.npoints ,opt.nc)  # (N, 4) 4 for (x,y,z,energy)
+    data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
     rectified_flow = RectifiedFlow(
         data_shape=data_shape,
         interp=opt.interp,
@@ -398,7 +403,8 @@ def train(gpu, opt, output_dir, noises_init):
                 lr_scheduler.step(epoch)
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
-                        x, int_energy, y, gap_pid, idx = data
+                        x, mask, int_energy, y, gap_pid, idx = data
+                        
                         # x_pc = x[:,:,:3]
                         # outf_syn = f"/global/homes/c/ccardona/PSF"
                         # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
@@ -427,27 +433,24 @@ def train(gpu, opt, output_dir, noises_init):
                         x_0 = x_0.transpose(1,2)
                     t = rectified_flow.sample_train_time(x.shape[0])
                     t= t.squeeze()
-                    #FIXME for now we will not use conditionals
-                    loss = rectified_flow.get_loss(
+                    #FIXME we probably need to overryde the loss to take into account the effect of the mask (?)
+                    rf_loss = rectified_flow.get_loss(
                                 x_0=x_0,
                                 x_1=x,
                                 y= y,
-                                #gap= gap_pid,
+                                gap= gap_pid,
                                 energy=int_energy,
                                 t=t,
+                                mask = mask,
                             )
-
-                    # loss = rectified_flow.get_loss(
-                    #             x_0=x_0,
-                    #             x_1=x,
-                    #             y= y,
-                    #             gap= gap_pid,
-                    #             energy=energy,
-                    #             t=t,
-                    #         )
-
+                    #####NOTE tryiing to correct mask effect ########
+                    ### rf.loss = Sum(errors)/n_total
+                    ### true.loss= Sum(error)/n_real= rf.loss*n_total/n_real
+                    n_total = x.numel()
+                    n_real = mask.sum()*x.shape[-1]
+                    loss = rf_loss*n_total/n_real
                     #loss = model.get_loss_iter(x, noises_batch).mean()
-
+                    ###########################################
                     optimizer.zero_grad()
                     loss.backward()
                     #netpNorm, netgradNorm = getGradNorm(model)
@@ -487,14 +490,19 @@ def train(gpu, opt, output_dir, noises_init):
                                 )
                                 
                         # Sample method
-                        #FIXME for now we will not use conditionals
-                        traj1 = euler_sampler.sample_loop(seed=233)
-                        # traj1 = euler_sampler.sample_loop(
-                        #     seed=233,
-                        #     y=y,
-                        #     gap= gap_pid,
-                        #     energy=energy,
-                        #     )
+                        #FIXME we should be using a validatioon small dataset instead
+                        num_samples = opt.sample_batch_size
+                        y =y[:num_samples]
+                        gap_pid = gap_pid[:num_samples]
+                        int_energy = int_energy[:num_samples]
+                        mask = mask[:num_samples]
+                        traj1 = euler_sampler.sample_loop(
+                            seed=233,
+                            y=y,
+                            gap= gap_pid,
+                            energy=int_energy,
+                            mask=mask,
+                            )
                         pts= traj1.x_t
                         trajectory = traj1.trajectories
                         #Ehistogram(X,pts, y, gap_pid, energy, title=f"Ehist_calopodit_del")
@@ -594,14 +602,17 @@ def parse_args():
     ''' Data '''
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
+    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/')
     parser.add_argument('--category', default='car')
     parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=500, help='input batch size')
+    parser.add_argument('--bs', type=int, default=256, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)
+    parser.add_argument("--num_classes", type=int, default=0, help=("Number of primary particles used in simulated data"),)
+    parser.add_argument("--gap_classes", type=int, default=2, help=("Number of calorimeter materials used in simulated data"),)
     
     '''model'''
     parser.add_argument("--model_name", type=str, default="pvcnn2", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")

@@ -163,23 +163,49 @@ class LazyIDLDataset(Dataset):
             self.x0 = reflow_data[0]
             self.x1 = reflow_data[1]
 
+    # def _create_global_index_map(self):
+    #     base_path = Path(self.data_dir)
+    #     # This finds all .h5/.hdf5 files in all subdirectories
+    #     file_paths = list(base_path.rglob("*.h5")) + list(base_path.rglob("*.hdf5"))
+    #     for file_path in file_paths:
+    #         # NOTE we will save the Pb dataset to test transferability
+    #         if "Pb_Simulation" in str(file_path):
+    #             continue
+    #         try:
+    #             with h5py.File(file_path, "r") as f:
+    #                 # The parent folder name acts as the category label
+    #                 #category = file_path.parent.name 
+    #                 for key in f.keys():
+    #                     self.global_index_map.append((str(file_path), key))
+    #         except Exception as e:
+    #             print(f"Error reading {file_path}: {e}")    
+    #     print(f"Dataset indexed. Total events found: {len(self.global_index_map)}")    
+
     def _create_global_index_map(self):
         base_path = Path(self.data_dir)
-        # This finds all .h5/.hdf5 files in all subdirectories
         file_paths = list(base_path.rglob("*.h5")) + list(base_path.rglob("*.hdf5"))
+        
+        lengths = [] # Temporary list to find the min
+        
         for file_path in file_paths:
-            # NOTE we will save the Pb dataset to test transferability
             if "Pb_Simulation" in str(file_path):
                 continue
             try:
                 with h5py.File(file_path, "r") as f:
-                    # The parent folder name acts as the category label
-                    #category = file_path.parent.name 
                     for key in f.keys():
+                        group = f[key]
+                        # Read the shape of the dataset without loading the data
+                        num_particles = group["indices"].shape[0]
                         self.global_index_map.append((str(file_path), key))
+                        lengths.append(num_particles)
             except Exception as e:
-                print(f"Error reading {file_path}: {e}")    
-        print(f"Dataset indexed. Total events found: {len(self.global_index_map)}")    
+                print(f"Error reading {file_path}: {e}")
+                
+        # Calculate the global minimum points across the entire dataset
+        self.max_particles = max(lengths) if lengths else 0
+        
+        print(f"Dataset indexed. Total events: {len(self.global_index_map)}")
+        print(f"Max particles found in dataset: {self.max_particles}")
 
     def __len__(self):
         """Returns the total number of individual events (showers) in the dataset."""

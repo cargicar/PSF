@@ -237,7 +237,7 @@ class DiTBlock(nn.Module):
         )
         self.skip_linear = nn.Linear(2 * hidden_size, hidden_size) if skip else None
 
-    def forward(self, x, c, x_skip=None):
+    def forward(self, x, c, mask= None, x_skip=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.adaLN_modulation(c).chunk(6, dim=1)
         )
@@ -245,9 +245,28 @@ class DiTBlock(nn.Module):
         if self.skip_linear is not None:
             x = self.skip_linear(torch.cat([x, x_skip], dim=-1))
 
+        #NOTE Pass mask to self.attn
+        # TIMM Attention expects 'attn_mask'. Note: Check if your timm version 
+        # uses 'mask' or 'attn_mask'. Usually, it's 'attn_mask'.
+        # --- NEW MASK PREPARATION ---
+        attn_mask = None
+        if mask is not None:
+            # mask shape: [Batch, Points] (125, 2055)
+            # We need: [Batch, 1, 1, Points] to broadcast across heads and queries
+            attn_mask = mask.unsqueeze(1).unsqueeze(2) 
+            
+            # PyTorch SDPA uses boolean masks where:
+            # False = MASK OUT (ignore), True = KEEP
+            # Ensure your mask is boolean
+            attn_mask = attn_mask.bool()
+        # ----------------------------
         x = x + gate_msa.unsqueeze(1) * self.attn(
-            modulate(self.norm1(x), shift_msa, scale_msa)
+            modulate(self.norm1(x), shift_msa, scale_msa),
+            attn_mask=attn_mask 
         )
+        # x = x + gate_msa.unsqueeze(1) * self.attn(
+        #     modulate(self.norm1(x), shift_msa, scale_msa)
+        # )
         x = x + gate_mlp.unsqueeze(1) * self.mlp(
             modulate(self.norm2(x), shift_mlp, scale_mlp)
         )
@@ -511,7 +530,7 @@ class DiT(nn.Module):
     #     imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
     #     return imgs
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, y=None, gap=None, energy = None):
+    def forward(self, x: torch.Tensor, t: torch.Tensor, y=None, gap=None, energy = None, mask = None):
         """
         Forward pass of DiT.
         x: (N, HxW,C)=(N, Points, C) tensor of spatial point inputs 
@@ -541,17 +560,23 @@ class DiT(nn.Module):
         #'c' contains t + y (+ gap) (+ energy) 
         skips = []
         for idx, block in enumerate(self.in_blocks):
-            x = block(x, c)  # (N, T, D)
+            x = block(x, c, mask = mask)  # (N, T, D)
             skips.append(x)
 
-        x = self.mid_block(x, c)  # (N, T, D)
+        x = self.mid_block(x, c, mask)  # (N, T, D)
 
         for block in self.out_blocks:
-            x = block(x, c, x_skip=skips.pop())  # (N, T, D), with long skip connections
+            x = block(x, c, mask = mask, x_skip=skips.pop())  # (N, T, D), with long skip connections
         x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
         #NOTE Not needed for point transformer?
         #x = self.unpatchify(x)  # (N, out_channels, H, W)
         x = self.final_conv(x)  # (N, out_channels, H, W)
+
+        #NOTE CRITICAL: Zero out the padded points in the output
+        if mask is not None:
+            # mask is (N, P), x is (N, P, C)
+            x = x * mask.unsqueeze(-1)
+            
         return x
 
 

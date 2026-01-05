@@ -291,10 +291,12 @@ def train(gpu, opt, output_dir, noises_init):
         gap_pids_batch = torch.stack(gap_pids_list, dim=0)
 
         return padded_batch, mask, energies_batch, pids_batch, gap_pids_batch, idx
-
-    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
-    dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=partial(pad_collate_fn, max_particles= train_dataset.max_particles))
-
+    if opt.model_name == 'calopodit': #mask strategy for variable PCs
+        train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
+        dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=partial(pad_collate_fn, max_particles= train_dataset.max_particles))
+    elif opt.model_name == 'pvcnn2':
+        train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
+        dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=partial(pad_collate_fn, max_particles= train_dataset.max_particles))
 
     '''
     create networks
@@ -410,8 +412,9 @@ def train(gpu, opt, output_dir, noises_init):
                         # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
                         #                        x_pc, None, None,
                         #                        None)
-                        # if opt.model_name == "pvcnn2":
-                        #     x = x.transpose(1,2)
+                        if opt.model_name == "pvcnn2":
+                            x = x.transpose(1,2)
+                            mask = None
                         #noises_batch = noises_init[list(idx)].transpose(1,2)
                     elif opt.dataname == 'shapenet':
                         x = data['train_points']
@@ -446,9 +449,12 @@ def train(gpu, opt, output_dir, noises_init):
                     #####NOTE tryiing to correct mask effect ########
                     ### rf.loss = Sum(errors)/n_total
                     ### true.loss= Sum(error)/n_real= rf.loss*n_total/n_real
-                    n_total = x.numel()
-                    n_real = mask.sum()*x.shape[-1]
-                    loss = rf_loss*n_total/n_real
+                    if mask is not None:
+                        n_total = x.numel()
+                        n_real = mask.sum()*x.shape[-1]
+                        loss = rf_loss*n_total/n_real
+                    else:
+                        loss = rf_loss
                     #loss = model.get_loss_iter(x, noises_batch).mean()
                     ###########################################
                     optimizer.zero_grad()
@@ -495,7 +501,7 @@ def train(gpu, opt, output_dir, noises_init):
                         y =y[:num_samples]
                         gap_pid = gap_pid[:num_samples]
                         int_energy = int_energy[:num_samples]
-                        mask = mask[:num_samples]
+                        mask = mask[:num_samples] if mask is not None else None 
                         traj1 = euler_sampler.sample_loop(
                             seed=233,
                             y=y,
@@ -536,9 +542,9 @@ def train(gpu, opt, output_dir, noises_init):
                                             None,
                                             None)
 
-                    # visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x.transpose(1,2), None,
-                    #                            None,
-                    #                            None)
+                    visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x.transpose(1,2), None,
+                                               None,
+                                               None)
 
                     logger.info('Generation: train')
                     model.train()

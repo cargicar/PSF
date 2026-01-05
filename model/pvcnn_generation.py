@@ -235,8 +235,6 @@ class PVCNN2Base(nn.Module):
 
     def forward(self, inputs, t: torch.Tensor, y=None, gap=None, energy = None, mask = None, p_uncond = 0.1):
         device = inputs.device
-        if inputs.shape[1] != self.in_channels:
-            inputs = inputs.transpose(1, 2).contiguous()
         B, C, N = inputs.shape
         train_time = self.get_timestep_embedding(t, device)
         # Get Gap Embedding (Conditioning)
@@ -261,9 +259,6 @@ class PVCNN2Base(nn.Module):
         # 4. Project to model's internal embed_dim
         temb = self.embedf(combined_vis)[:, :, None].expand(-1, -1, inputs.shape[-1])
 
-        if mask is not None:
-        # mask is [B, N], make it [B, 1, N] for broadcasting
-            temb = temb * mask.unsqueeze(1).float()
         
         # inputs : [B, in_channels + S, N]
         coords, features = inputs[:, :3, :].contiguous(), inputs

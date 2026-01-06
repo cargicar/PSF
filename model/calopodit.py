@@ -537,7 +537,7 @@ class DiT(nn.Module):
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
         """
-        x= self.x_embedder(x)[0] # (points:(N,P,transformer_features))
+        x= self.x_embedder(x, mask = mask)[0] # (points:(N,P,transformer_features))
         #x = (x_emb + self.pos_embed)  # (N, T, D), where T = H * W / patch_size ** 2
         
         #t = self.t_embedder(t)  # (N, D)
@@ -572,7 +572,7 @@ class DiT(nn.Module):
         #x = self.unpatchify(x)  # (N, out_channels, H, W)
         x = self.final_conv(x)  # (N, out_channels, H, W)
 
-        #NOTE CRITICAL: Zero out the padded points in the output
+        #NOTE Zero out the padded points in the output
         if mask is not None:
             # mask is (N, P), x is (N, P, C)
             x = x * mask.unsqueeze(-1)

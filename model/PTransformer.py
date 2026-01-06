@@ -135,12 +135,20 @@ class TransformerBlock(nn.Module):
         self.k = k
         
     # xyz: b x n x in_feat = b x n x 4
-    def forward(self, xyz):
+    def forward(self, xyz, mask = None):
         features = self.fc0(xyz) # features: b x n x hidden_size =(b, n, 128)
         pre = features # Save for residual connection, (b, n, 128)
 
         #dist: bxnxn = bx(n_{i,j}= square distance n_i to n_j) (why not square-root?)
         dists = square_distance(xyz, xyz)
+        # Masking Distances
+        if mask is not None:
+            # If a point is a pad (mask=0), make it infinitely far away 
+            # so it is never a neighbor of a real point.
+            fill_value = 1e9
+            # mask shape (B, P) -> (B, 1, P) for broadcasting across rows
+            dists = dists.masked_fill(~mask.unsqueeze(1), fill_value)
+        # ------------------------------
         knn_idx = dists.argsort()[:, :, :self.k]  # b x n x k = bx(firs_k(distance n_i to k n_j ))
         knn_xyz = index_points(xyz, knn_idx) # b x n x k x in_features = bx(4 dim coordinates of k closest points to n_i)
         # in simplest words, each point n_i has attached to it is closest k neightbors
@@ -166,5 +174,8 @@ class TransformerBlock(nn.Module):
         res = torch.einsum('bmnf,bmnf->bmf', attn, v + pos_enc)
         # res:bxnxd_model*linear(d_model,d_points) = bxnx(d_points=32)
         res = self.fc2(res) + pre
+        #Zero out padded features before returning ---
+        if mask is not None:
+            res = res * mask.unsqueeze(-1)
         return res, attn
     

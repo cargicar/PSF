@@ -1900,7 +1900,8 @@ def read_generated(file_path, material_list=["G4_Ta","G4_W",],num_showers=-1,mat
             if mat.decode('utf-8') != material:
                 continue
             
-            xg, yg, zg, eg = gen_tensor[i].T
+            #xg, yg, zg, eg = gen_tensor[i].T
+            xg, yg, zg, eg = gen_tensor[i] #pvcnn
             # eg_min = eg.min()
             #eg_max = eg.max()
             #eg = (eg - eg_min) / (eg_max - eg_min)   # Rescale to initial energy
@@ -1953,8 +1954,8 @@ if __name__ == "__main__":
     #parser.add_argument("--file_path", type=str, required=True, help="Path to the HDF5 file containing generated showers")
     parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/w_sim/photon-shower-0_corrected_compressed.hdf5')
     #parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2025-12-26-12-04-19/syn/photon_samples.pth')
-    parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-02_calopodit_idl_mask/syn/combined_photon_samples.pth')
-    parser.add_argument("--num_showers", type=int, default=10000, help="Number of showers to process (-1 for all)")
+    parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-06-pvcnn_idl/syn/combined_photon_samples.pth')
+    parser.add_argument("--num_showers", type=int, default=1000, help="Number of showers to process (-1 for all)")
     args = parser.parse_args()
     filepaths = [args.dataroot, args.genroot]
     make_plots(filepaths, num_showers=args.num_showers)

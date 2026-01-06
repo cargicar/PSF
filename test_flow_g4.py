@@ -701,7 +701,38 @@ def evaluate_gen(opt, ref_pcs, logger):
 def generate(model, opt):
 
     ''' data '''
-    def pad_collate_fn(batch, max_particles=1000):
+    # def pad_collate_fn(batch, max_particles=1000):
+    #     """
+    #     Custom collate function to handle batches of showers with varying numbers of particles.
+    #     It pads or truncates each shower to a fixed size and then stacks them.
+
+    #     Args:
+    #         batch (list): A list of data samples from the dataset.
+    #         max_particles (int): The maximum number of particles to keep per shower.
+    #     Returns:
+    #         A tuple of batched PyTorch tensors.
+    #     """
+    #     showers_list, energies_list, pids_list, gap_pids_list, idx = zip(*batch)
+    #     nfeatures, dtype, device = showers_list[0].shape[1], showers_list[0].dtype, showers_list[0].device
+        
+    #     # Initialize tensors for padded data and masks
+    #     # (Batch_Size, Max_N, 3)
+    #     padded_batch = torch.zeros((len(showers_list), max_particles, nfeatures), dtype= dtype, device= device)
+    #     mask = torch.zeros((len(showers_list), max_particles), dtype=torch.bool, device= device)
+        
+    #     for i, shower in enumerate(showers_list):
+    #         num_particles = shower.shape[0]
+    #         padded_batch[i, :num_particles, :] = shower
+    #         mask[i, :num_particles] = True
+            
+
+    #     # Stack all tensors to create the batch
+    #     energies_batch = torch.stack(energies_list, dim=0)
+    #     pids_batch = torch.stack(pids_list, dim=0)
+    #     gap_pids_batch = torch.stack(gap_pids_list, dim=0)
+
+    #     return padded_batch, mask, energies_batch, pids_batch, gap_pids_batch, idx
+    def pad_collate_fn(batch, max_particles=opt.npoints):
         """
         Custom collate function to handle batches of showers with varying numbers of particles.
         It pads or truncates each shower to a fixed size and then stacks them.
@@ -713,33 +744,50 @@ def generate(model, opt):
             A tuple of batched PyTorch tensors.
         """
         showers_list, energies_list, pids_list, gap_pids_list, idx = zip(*batch)
-        nfeatures, dtype, device = showers_list[0].shape[1], showers_list[0].dtype, showers_list[0].device
-        
-        # Initialize tensors for padded data and masks
-        # (Batch_Size, Max_N, 3)
-        padded_batch = torch.zeros((len(showers_list), max_particles, nfeatures), dtype= dtype, device= device)
-        mask = torch.zeros((len(showers_list), max_particles), dtype=torch.bool, device= device)
-        
-        for i, shower in enumerate(showers_list):
+
+        padded_showers = []
+        for shower in showers_list:
             num_particles = shower.shape[0]
-            padded_batch[i, :num_particles, :] = shower
-            mask[i, :num_particles] = True
-            
+            if num_particles > max_particles:
+                # Truncate if the number of particles exceeds the max
+                padded_shower = shower[:max_particles]
+            else:
+                # Pad with zeros if the number of particles is less than the max
+                padding = torch.zeros(max_particles - num_particles, shower.shape[1], dtype=shower.dtype, device=shower.device)
+                padded_shower = torch.cat([shower, padding], dim=0)
+            padded_showers.append(padded_shower)
 
         # Stack all tensors to create the batch
+        showers_batch = torch.stack(padded_showers, dim=0)
         energies_batch = torch.stack(energies_list, dim=0)
         pids_batch = torch.stack(pids_list, dim=0)
         gap_pids_batch = torch.stack(gap_pids_list, dim=0)
+        mask = None
 
-        return padded_batch, mask, energies_batch, pids_batch, gap_pids_batch, idx
+        return showers_batch, mask, energies_batch, pids_batch, gap_pids_batch, idx
+
     
     _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.bs,
                                                       shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=partial(pad_collate_fn, max_particles= test_dataset.max_particles))
     
-    #Rectified_Flow
-    #data_shape = (opt.npoints ,opt.nc)  # (N, 4) 4 for (x,y,z,energy)
-    data_shape = (test_dataset.max_particles ,opt.nc)  # (N, 4) 4 for (x,y,z,energy)
+
+    #NOTE for debugging purposses 
+    subset_size = opt.bs*20
+    subset_indices = torch.randperm(len(test_dataset))[:subset_size]
+    subset_dataset = torch.utils.data.Subset(test_dataset, subset_indices)
+    
+    # subset_dataloader = torch.utils.data.DataLoader(subset_dataset, batch_size=opt.bs,
+    #                                                 shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=partial(pad_collate_fn, max_particles= test_dataset.max_particles))
+    if opt.model_name == 'calopodit': #mask strategy for variable PCs
+        subset_dataloader = torch.utils.data.DataLoader(subset_dataset, batch_size=opt.bs,
+                                                    shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=partial(pad_collate_fn, max_particles= test_dataset.max_particles))
+        data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
+    elif opt.model_name == 'pvcnn2': #not mask implemented yet
+        subset_dataloader = torch.utils.data.DataLoader(subset_dataset, batch_size=opt.bs,
+                                                    shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=pad_collate_fn)
+        data_shape = (opt.npoints, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
+
     rectified_flow = RectifiedFlow(
         data_shape=data_shape,
         interp=opt.interp,
@@ -768,15 +816,6 @@ def generate(model, opt):
                     #num_samples=opt.sample_batch_size,
                     num_samples=opt.bs,
                 )
-        
-        #NOTE for debugging purposses 
-        subset_size = opt.bs*50
-        subset_indices = torch.randperm(len(test_dataset))[:subset_size]
-        subset_dataset = torch.utils.data.Subset(test_dataset, subset_indices)
-        subset_dataloader = torch.utils.data.DataLoader(subset_dataset, batch_size=opt.bs,
-                                                      shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=partial(pad_collate_fn, max_particles= test_dataset.max_particles))
-        # subset_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.bs,
-        #                                               shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=partial(pad_collate_fn, max_particles= test_dataset.max_particles))
                                                       
 
         ref = []

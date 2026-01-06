@@ -203,9 +203,11 @@ class LazyIDLDataset(Dataset):
                 
         # Calculate the global minimum points across the entire dataset
         self.max_particles = max(lengths) if lengths else 0
+        self.min_particles = min(lengths) if lengths else 0
         
         print(f"Dataset indexed. Total events: {len(self.global_index_map)}")
         print(f"Max particles found in dataset: {self.max_particles}")
+        print(f"Min particles found in dataset: {self.min_particles}")
 
     def __len__(self):
         """Returns the total number of individual events (showers) in the dataset."""

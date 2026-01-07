@@ -16,6 +16,7 @@ import torch.distributed as dist
 
 #from rectified_flow.models.dit import DiT, DiTConfig
 from rectified_flow.rectified_flow import RectifiedFlow
+from rectified_flow.flow_components.loss_function import RectifiedFlowLossFunction
 from contextlib import contextmanager
 import torch.profiler
 from functools import partial
@@ -75,6 +76,60 @@ def profiler_table_output(prof, output_filename="profiling/cuda_memory_profile.t
         f.write(profiler_table_output)
 
     print(f"Profiler table saved to {output_filename}")
+
+class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
+    def __init__(self, loss_type: str = "mse", energy_weight: float = 0.1):
+        super().__init__(loss_type=loss_type)
+        self.energy_weight = energy_weight
+
+    def __call__(
+        self,
+        v_t: torch.Tensor,
+        dot_x_t: torch.Tensor,
+        x_t: torch.Tensor,
+        t: torch.Tensor,
+        time_weights: torch.Tensor,
+        mask: torch.Tensor = None,           # Added mask
+        target_energy: torch.Tensor = None,   # Added for physics constraint
+    ) -> torch.Tensor:
+        """
+        Calculates a masked MSE loss + Energy Conservation constraint.
+        """
+        if self.loss_type != "mse":
+            return super().__call__(v_t, dot_x_t, x_t, t, time_weights)
+
+        # 1. Compute Element-wise Squared Error
+        # Shape: (Batch, Max_Particles, Features)
+        sq_diff = (v_t - dot_x_t) ** 2
+
+        if mask is not None:
+            # 2. Apply Mask (B, P) -> (B, P, 1)
+            # This zeroes out the error for padded points
+            masked_sq_diff = sq_diff * mask.unsqueeze(-1).float()
+            
+            # 3. Sum over dimensions (Particles and Features)
+            # per_instance_loss shape: (Batch,)
+            # We divide by the number of active points in each instance for stability
+            points_per_instance = mask.sum(dim=1).clamp(min=1)
+            per_instance_loss = masked_sq_diff.sum(dim=(1, 2)) / (points_per_instance * v_t.shape[-1])
+        else:
+            # Fallback to standard mean if no mask provided
+            per_instance_loss = torch.mean(sq_diff, dim=list(range(1, v_t.dim())))
+
+        # 4. Standard RF weighting
+        loss = torch.mean(time_weights * per_instance_loss)
+
+        # 5. Physics Constraint: Energy Conservation
+        # Constrain the sum of velocities in the energy dimension (index 3)
+        if target_energy is not None and mask is not None:
+            # Velocity toward the target sum: sum(v_t_energy) should match sum(dot_x_t_energy)
+            pred_energy_sum = (v_t[:, :, 3] * mask).sum(dim=1)
+            target_energy_sum = (dot_x_t[:, :, 3] * mask).sum(dim=1)
+            
+            physics_loss = F.mse_loss(pred_energy_sum, target_energy_sum)
+            loss = loss + (self.energy_weight * physics_loss)
+
+        return loss
 
 def train(gpu, opt, output_dir, noises_init):
     
@@ -189,6 +244,8 @@ def train(gpu, opt, output_dir, noises_init):
     # def new_x_chain(x, num_chain):
     #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
     #Rectified_Flow
+    #rf_criterion = RectifiedFlowLossFunction(loss_type = "mse")
+    rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 0.1)
     data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
     rectified_flow = RectifiedFlow(
         data_shape=data_shape,
@@ -197,7 +254,7 @@ def train(gpu, opt, output_dir, noises_init):
         is_independent_coupling=opt.is_independent_coupling,
         train_time_distribution=opt.train_time_distribution,
         train_time_weight=opt.train_time_weight,
-        criterion=opt.criterion,
+        criterion=rf_criterion, #opt.criterion,
         velocity_field=model,
         #device=accelerator.device,
         dtype=torch.float32,

@@ -190,8 +190,8 @@ class MyEulerSampler(Sampler):
             mask = model_kwargs["mask"].unsqueeze(-1).to(self.x_t.device)
             self.x_t = self.x_t * mask
 
-
-class MaskedFlowMatchingCriterion(nn.Module):
+#TODO: Use in training. Currently not used.
+class MaskedFlowCriterion(nn.Module):
     def __init__(self, reduction='mean'):
         super().__init__()
         self.reduction = reduction
@@ -203,13 +203,13 @@ class MaskedFlowMatchingCriterion(nn.Module):
         #     time_weights=time_weights,
         # )
 
-    def forward(self, v_t, dot_x_t, mask, time_weights=None, **kwargs):
+    def forward(self, v_t, dot_x_t, x_t, t, time_weights=None, **kwargs):
         # 1. Compute Raw Squared Error: (B, N, C)
         sq_error = (v_t - dot_x_t) ** 2
         
         # 2. Apply Mask: (B, N) -> (B, N, 1)
         # This ignores the 'velocity' of the padding
-        masked_error = sq_error * mask.unsqueeze(-1).float()
+        masked_error = sq_error * self.mask.unsqueeze(-1).float()
         
         # 3. Apply Time Weights (if used)
         if time_weights is not None:
@@ -219,6 +219,6 @@ class MaskedFlowMatchingCriterion(nn.Module):
         # 4. Reduction
         if self.reduction == 'mean':
             # Normalize by the number of actual points in the entire batch
-            return masked_error.sum() / mask.sum().clamp(min=1)
+            return masked_error.sum() / self.mask.sum().clamp(min=1)
         else:
             return masked_error.sum()

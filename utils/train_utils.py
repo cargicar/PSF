@@ -8,7 +8,9 @@ from datasets.idl_dataset import LazyIDLDataset as IDLDataset
 from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
 from rectified_flow.samplers.base_sampler import Sampler
 from rectified_flow.samplers import EulerSampler
+from rectified_flow.flow_components.loss_function import RectifiedFlowLossFunction
 import numpy as np
+import torch.nn.functional as F
 
 def get_betas(schedule_type, b_start, b_end, time_num):
     if schedule_type == 'linear':
@@ -119,7 +121,7 @@ def pad_collate_fn(batch, max_particles=1000):
     energies_batch = torch.stack(energies_list, dim=0)
     pids_batch = torch.stack(pids_list, dim=0)
     gap_pids_batch = torch.stack(gap_pids_list, dim=0)
-
+    
     return padded_batch, mask, energies_batch, pids_batch, gap_pids_batch, idx
 
 def get_dataloader(opt, train_dataset, test_dataset=None, collate_fn=None):
@@ -142,11 +144,11 @@ def get_dataloader(opt, train_dataset, test_dataset=None, collate_fn=None):
         train_sampler = None
         test_sampler = None
 
-    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=opt.bs,sampler=train_sampler,
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=opt.bs,sampler=train_sampler, pin_memory = True,
                                                    shuffle=train_sampler is None, num_workers=int(opt.workers), drop_last=True, collate_fn=collate_fn )
 
     if test_dataset is not None:
-        test_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=opt.bs,sampler=test_sampler,
+        test_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=opt.bs,sampler=test_sampler, pin_memory = True,
                                                    shuffle=False, num_workers=int(opt.workers), drop_last=False,  collate_fn=collate_fn)
     else:
         test_dataloader = None
@@ -190,35 +192,55 @@ class MyEulerSampler(Sampler):
             mask = model_kwargs["mask"].unsqueeze(-1).to(self.x_t.device)
             self.x_t = self.x_t * mask
 
-#TODO: Use in training. Currently not used.
-class MaskedFlowCriterion(nn.Module):
-    def __init__(self, reduction='mean'):
-        super().__init__()
-        self.reduction = reduction
-        #     return self.criterion(
-        #     v_t=v_t,
-        #     dot_x_t=dot_x_t,
-        #     x_t=x_t,
-        #     t=t,
-        #     time_weights=time_weights,
-        # )
+class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
+    def __init__(self, loss_type: str = "mse", energy_weight: float = 0.1):
+        super().__init__(loss_type=loss_type)
+        self.energy_weight = energy_weight
 
-    def forward(self, v_t, dot_x_t, x_t, t, time_weights=None, **kwargs):
-        # 1. Compute Raw Squared Error: (B, N, C)
-        sq_error = (v_t - dot_x_t) ** 2
-        
-        # 2. Apply Mask: (B, N) -> (B, N, 1)
-        # This ignores the 'velocity' of the padding
-        masked_error = sq_error * self.mask.unsqueeze(-1).float()
-        
-        # 3. Apply Time Weights (if used)
-        if time_weights is not None:
-            # time_weights is usually (B,)
-            masked_error = masked_error * time_weights.view(-1, 1, 1)
-            
-        # 4. Reduction
-        if self.reduction == 'mean':
-            # Normalize by the number of actual points in the entire batch
-            return masked_error.sum() / self.mask.sum().clamp(min=1)
+    def __call__(
+        self,
+        v_t: torch.Tensor,
+        dot_x_t: torch.Tensor,
+        x_t: torch.Tensor,
+        t: torch.Tensor,
+        time_weights: torch.Tensor,
+        mask: torch.Tensor = None,           # Added mask
+        target_energy: torch.Tensor = None,   # Added for physics constraint
+    ) -> torch.Tensor:
+        """
+        Calculates a masked MSE loss + Energy Conservation constraint.
+        """
+        if self.loss_type != "mse":
+            return super().__call__(v_t, dot_x_t, x_t, t, time_weights)
+    
+        # Compute Element-wise Squared Error
+        # Shape: (Batch, Max_Particles, Features)
+        sq_diff = (v_t - dot_x_t) ** 2
+        if mask is not None:
+            # Apply Mask (B, P) -> (B, P, 1)
+            # This zeroes out the error for padded points
+            masked_sq_diff = sq_diff * mask.unsqueeze(-1).float()
+            #  Sum over dimensions (Particles and Features)
+            # per_instance_loss shape: (Batch,)
+            # We divide by the number of active points in each instance for stability
+            points_per_instance = mask.sum(dim=1).clamp(min=1)
+            per_instance_loss = masked_sq_diff.sum(dim=(1, 2)) / (points_per_instance * v_t.shape[-1])
         else:
-            return masked_error.sum()
+            # Fallback to standard mean if no mask provided
+            per_instance_loss = torch.mean(sq_diff, dim=list(range(1, v_t.dim())))
+
+        # Standard RF weighting
+        loss = torch.mean(time_weights * per_instance_loss)
+
+        #  Physics Constraint: Energy Conservation
+        # Constrain the sum of velocities in the energy dimension (index 3)
+
+        if target_energy is not None and mask is not None:
+            # Velocity toward the target sum: sum(v_t_energy) should match sum(dot_x_t_energy)
+            pred_energy_sum = (v_t[:, :, 3] * mask).sum(dim=1)
+            target_energy_sum = (dot_x_t[:, :, 3] * mask).sum(dim=1)
+            
+            physics_loss = F.mse_loss(pred_energy_sum, target_energy_sum)
+            loss = loss + (self.energy_weight * physics_loss)
+
+        return loss

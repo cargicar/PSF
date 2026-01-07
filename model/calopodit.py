@@ -109,40 +109,65 @@ class TimestepEmbedder(nn.Module):
         return t_emb
 
 
-class LabelEmbedder(nn.Module):
-    """
-    Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
-    """
+# class LabelEmbedder(nn.Module):
+#     """
+#     Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
+#     """
 
+#     def __init__(self, num_classes, hidden_size, dropout_prob):
+#         super().__init__()
+#         use_cfg_embedding = dropout_prob > 0
+#         self.embedding_table = nn.Embedding(
+#             num_classes + use_cfg_embedding, hidden_size
+#         )
+#         self.num_classes = num_classes
+#         self.dropout_prob = dropout_prob
+
+#     def token_drop(self, labels, force_drop_ids=None):
+#         """
+#         Drops labels to enable classifier-free guidance.
+#         """
+#         if force_drop_ids is None:
+#             drop_ids = (
+#                 torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+#             )
+#         else:
+#             drop_ids = force_drop_ids == 1
+#         labels = torch.where(drop_ids, self.num_classes, labels)
+#         return labels
+
+#     def forward(self, labels, train, force_drop_ids=None):
+#         use_dropout = self.dropout_prob > 0
+#         if (train and use_dropout) or (force_drop_ids is not None):
+#             labels = self.token_drop(labels, force_drop_ids)
+#         embeddings = self.embedding_table(labels)
+#         return embeddings
+
+class LabelEmbedder(nn.Module):
     def __init__(self, num_classes, hidden_size, dropout_prob):
         super().__init__()
-        use_cfg_embedding = dropout_prob > 0
-        self.embedding_table = nn.Embedding(
-            num_classes + use_cfg_embedding, hidden_size
-        )
-        self.num_classes = num_classes
         self.dropout_prob = dropout_prob
-
-    def token_drop(self, labels, force_drop_ids=None):
-        """
-        Drops labels to enable classifier-free guidance.
-        """
-        if force_drop_ids is None:
-            drop_ids = (
-                torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
-            )
-        else:
-            drop_ids = force_drop_ids == 1
-        labels = torch.where(drop_ids, self.num_classes, labels)
-        return labels
+        self.num_classes = num_classes
+        # We add +1 to the table to act as the "null" token
+        self.embedding_table = nn.Embedding(num_classes + 1, hidden_size)
 
     def forward(self, labels, train, force_drop_ids=None):
-        use_dropout = self.dropout_prob > 0
-        if (train and use_dropout) or (force_drop_ids is not None):
-            labels = self.token_drop(labels, force_drop_ids)
-        embeddings = self.embedding_table(labels)
-        return embeddings
+        if force_drop_ids is None:
+            if train and self.dropout_prob > 0:
+                drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+            else:
+                drop_ids = torch.zeros(labels.shape[0], device=labels.device, dtype=torch.bool)
+        else:
+            # force_drop_ids comes from the sampling loop (usually 1 for drop, 0 for keep)
+            drop_ids = force_drop_ids.bool()
 
+        # Create a copy so we don't modify the original labels tensor
+        labels_copy = labels.clone()
+        # Replace dropped samples with the 'null' index (the last index)
+        labels_copy[drop_ids] = self.num_classes
+        
+        return self.embedding_table(labels_copy)
+    
 class EnergyEmbedder(nn.Module):
     """
     Embeds continuous (float) energy class into vector representations.
@@ -374,7 +399,6 @@ class DiT(nn.Module):
         #self.pos_embed = nn.Parameter(
         #    torch.zeros(1, num_patches, config.hidden_size), requires_grad=False
         #)
-
         self.in_blocks = nn.ModuleList(
             [
                 DiTBlock(
@@ -530,7 +554,7 @@ class DiT(nn.Module):
     #     imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
     #     return imgs
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, y=None, gap=None, energy = None, mask = None):
+    def forward(self, x: torch.Tensor, t: torch.Tensor, y=None, gap=None, energy = None, mask = None, force_drop_ids=None):
         """
         Forward pass of DiT.
         x: (N, HxW,C)=(N, Points, C) tensor of spatial point inputs 
@@ -544,16 +568,16 @@ class DiT(nn.Module):
         c = self.t_embedder(t)  # c is (N, D)
         #Sequentially add other embeddings to 'c'
         if hasattr(self, "y_embedder"):
-            y_emb = self.y_embedder(y, self.training)  # (N, D)
+            y_emb = self.y_embedder(y, self.training, force_drop_ids=force_drop_ids)  # (N, D)
             # Add the y embedding to the conditional vector 'c'
             c = c + y_emb
         if hasattr(self, "gap_embedder"):
-            gap_emb = self.gap_embedder(gap, self.training)  # (N, D)
+            gap_emb = self.gap_embedder(gap, self.training, force_drop_ids=force_drop_ids)  # (N, D)
             # Add the gap embedding to the conditional vector 'c'
             c = c + gap_emb
 
         if hasattr(self, "e_embedder"):
-            energy_emb = self.e_embedder(energy, self.training)  # (N, D)
+            energy_emb = self.e_embedder(energy, self.training, force_drop_ids=force_drop_ids)  # (N, D)
             # Add the energy embedding conditional vector 'c'
             c = c + energy_emb
         
@@ -578,6 +602,38 @@ class DiT(nn.Module):
             x = x * mask.unsqueeze(-1)
             
         return x
+    def forward_with_cfg(self, x, t, y, gap, energy, mask, cfg_scale):
+        """
+        Forward pass with Classifier-Free Guidance extrapolation.
+        cfg_scale: 0.0 or 1.0 means no guidance, > 1.0 means guidance.
+        """
+        # 1. Duplicate inputs for batch processing: 
+        # One half for conditional, one half for unconditional
+        # (Optional: You can do two separate passes if memory is tight)
+        combined_x = torch.cat([x, x], dim=0)
+        combined_t = torch.cat([t, t], dim=0)
+        combined_mask = torch.cat([mask, mask], dim=0) if mask is not None else None
+        
+        # 2. Create "Null" conditions for the second half of the batch
+        # We use force_drop_ids=1 to trigger the null_embedding in your embedders
+        batch_size = x.shape[0]
+        force_drop = torch.zeros(batch_size * 2, device=x.device)
+        force_drop[batch_size:] = 1  # Second half is unconditional
+        
+        # 3. Pass through the model
+        # Note: Modify your forward() to pass force_drop_ids to the embedders
+        model_out = self.forward(
+            combined_x, combined_t, y, gap, energy, 
+            mask=combined_mask, force_drop_ids=force_drop
+        )
+        
+        # 4. Split and Extrapolate
+        eps_cond, eps_uncond = model_out.chunk(2, dim=0)
+        
+        # The CFG Equation: eps = eps_uncond + scale * (eps_cond - eps_uncond)
+        guided_eps = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
+        
+        return guided_eps
 
 
 #################################################################################

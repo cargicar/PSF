@@ -1951,10 +1951,10 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Plot generated showers vs ground truth")
     #parser.add_argument("--file_path", type=str, required=True, help="Path to the HDF5 file containing generated showers")
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/w_sim/photon-shower-0_corrected_compressed.hdf5')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/w_sim/photon-shower-10_corrected_compressed.hdf5')
     #parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2025-12-26-12-04-19/syn/photon_samples.pth')
-    parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-02_calopodit_idl_mask/syn/combined_photon_samples.pth')
-    parser.add_argument("--num_showers", type=int, default=10000, help="Number of showers to process (-1 for all)")
+    parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-06_clopodit_idl_mask/syn/combined_photon_samples.pth')
+    parser.add_argument("--num_showers", type=int, default=2560, help="Number of showers to process (-1 for all)")
     args = parser.parse_args()
     filepaths = [args.dataroot, args.genroot]
     make_plots(filepaths, num_showers=args.num_showers)

@@ -671,7 +671,92 @@ def evaluate_gen(opt, ref_pcs, logger):
     pprint('JSD: {}'.format(jsd))
     logger.info('JSD: {}'.format(jsd))
 
+@torch.no_grad()
+def sample_cfg(model, n_samples, max_particles, device, cfg_scale=4.0, steps=50):
+    """
+    Generates point clouds using Classifier-Free Guidance.
+    """
+    model.eval()
+    
+    # 1. Initialize starting noise: (N, Particles, Features)
+    # We assume features=4 (x, y, z, energy/hit)
+    z = torch.randn(n_samples, max_particles, model.config.in_features, device=device)
+    
+    # 2. Setup Conditions (Dummy example: replace with your desired class/energy)
+    # For calorimeter showers, you'd specify the energy you want to generate
+    y = torch.zeros(n_samples, dtype=torch.long, device=device) # Class 0
+    gap = torch.zeros(n_samples, dtype=torch.long, device=device) 
+    energy = torch.ones(n_samples, 1, device=device) * 0.5 # Normalized energy
+    
+    # 3. Create a mask (For generation, we usually assume all slots are 'valid' 
+    # and let the model learn to predict zeros for extra particles, 
+    # or we provide a fixed N-particle mask)
+    mask = torch.ones(n_samples, max_particles, dtype=torch.bool, device=device)
 
+    # 4. Define Time Steps (Linearly spaced from 1.0 to 0)
+    time_steps = torch.linspace(1.0, 0.0, steps + 1, device=device)
+
+    for i in range(steps):
+        t_curr = time_steps[i]
+        t_next = time_steps[i+1]
+        
+        # Expand t for the batch
+        t_tensor = torch.ones(n_samples, device=device) * t_curr
+        
+        # --- CFG DUAL PASS ---
+        # We concatenate the noise for a single batch pass
+        # Pass 1: Conditional, Pass 2: Unconditional
+        combined_z = torch.cat([z, z], dim=0)
+        combined_t = torch.cat([t_tensor, t_tensor], dim=0)
+        combined_mask = torch.cat([mask, mask], dim=0)
+        
+        # Labels/Energy for the whole batch
+        combined_y = torch.cat([y, y], dim=0)
+        combined_gap = torch.cat([gap, gap], dim=0)
+        combined_energy = torch.cat([energy, energy], dim=0)
+        
+        # Set force_drop_ids: 0 for the first half, 1 for the second half
+        force_drop = torch.cat([
+            torch.zeros(n_samples, device=device),
+            torch.ones(n_samples, device=device)
+        ], dim=0)
+
+        # Predict noise (epsilon)
+        model_out = model(
+            combined_z, combined_t, 
+            y=combined_y, gap=combined_gap, energy=combined_energy, 
+            mask=combined_mask, force_drop_ids=force_drop
+        )
+        
+        eps_cond, eps_uncond = model_out.chunk(2, dim=0)
+        
+        # CFG Extrapolation
+        eps = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
+        
+        # 5. DDIM Update Step (Simplified)
+        # In a real implementation, you'd use alphas_cumprod from your schedule
+        # Here is the conceptual Euler-step update:
+        dt = time_steps[i] - time_steps[i+1]
+        z = z - eps * dt 
+
+    # Final Masking
+    z = z * mask.unsqueeze(-1)
+    return z
+"""2. Important Considerations for Point Clouds
+
+The "Mask" during Generation: In training, the mask is provided by the real data. In generation, you have to decide the "size" of the shower. You can either:
+
+Generate a fixed max_particles count.
+
+Pre-sample a num_particles from a distribution and create a mask accordingly.
+
+Coordinate Scaling: Since your TransformerBlock uses k-NN, ensure your noise initialization and generated coordinates stay within the range the model saw during training (e.g., normalized to [−1,1] or [0,1]).
+
+The Guidance Scale (s): * s=1.0: Standard conditional generation.
+
+s>1.0: Stronger adherence to the specific energy/class.
+
+s=0.0: Purely unconditional (ignores your energy/label inputs)."""
 
 def generate(model, opt):
 
@@ -745,7 +830,7 @@ def generate(model, opt):
                 )
         
         #NOTE for debugging purposses 
-        subset_size = opt.bs*50
+        subset_size = opt.bs*20
         subset_indices = torch.randperm(len(test_dataset))[:subset_size]
         subset_dataset = torch.utils.data.Subset(test_dataset, subset_indices)
         subset_dataloader = torch.utils.data.DataLoader(subset_dataset, batch_size=opt.bs,

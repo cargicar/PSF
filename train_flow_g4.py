@@ -78,7 +78,7 @@ def profiler_table_output(prof, output_filename="profiling/cuda_memory_profile.t
     print(f"Profiler table saved to {output_filename}")
 
 def train(gpu, opt, output_dir, noises_init):
-    
+    debug = False
     set_seed(opt)
     logger = setup_logging(output_dir)
     if opt.distribution_type == 'multi':
@@ -318,7 +318,6 @@ def train(gpu, opt, output_dir, noises_init):
                         pts= traj1.x_t
                         trajectory = traj1.trajectories
                         
-                        make_phys_plots(x, pts, savepath = outf_syn)
                         #Ehistogram(X,pts, y, gap_pid, energy, title=f"Ehist_calopodit_del")
                         #plot_batch_3d(pts, y, gaps=gap_pid, energies= energy, title = "Model sampler_G4")
 
@@ -339,24 +338,24 @@ def train(gpu, opt, output_dir, noises_init):
                         #     .format(
                         #     epoch, opt.niter,
                         #     *gen_eval_range, *gen_stats,
-                        # ))
+                            # ))
+                    if debug:
+                        visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
+                                                trajectory, None, None,
+                                                None)
 
-                    visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                                            trajectory, None, None,
-                                            None)
-
-                    visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
-                                            pts, None,
-                                            None,
-                                            None)
-
-                    visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x, None,
+                        visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
+                                                pts, None,
                                                 None,
                                                 None)
 
+                        visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x, None,
+                                                    None,
+                                                    None)
+                        make_phys_plots(x, pts, savepath = outf_syn)
                     logger.info('Generation: train')
                     model.train()
-
+                    
                 if (epoch + 1) % opt.saveIter == 0:
 
                     if should_diag:

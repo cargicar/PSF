@@ -240,7 +240,7 @@ class LazyIDLDataset(Dataset):
 #                    material_index = self.material_list.index(material)
                 material_index = 0 #FIXME Temporary
                 gap_pid = 0 #FIXME Temporary
-                initial_energy = ((initial_energy - 10.) / 45.) - 1.0 # Scale to roughly -1 to 1
+                #initial_energy = ((initial_energy - 10.) / 45.) - 1.0 # Scale to roughly -1 to 1
                 #all_showers.append(shower)
         
                 

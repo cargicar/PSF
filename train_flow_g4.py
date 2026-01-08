@@ -291,36 +291,34 @@ def train(gpu, opt, output_dir, noises_init):
 
                     model.eval()
                     #x = x
+                    #TODO CFG has to be done here
+                    num_samples=opt.bs
+                    num_steps = opt.num_steps
                     with torch.no_grad():
                         if opt.model_name == "pvcnn2":
                             euler_sampler = MyEulerSamplerPVCNN(
                                 rectified_flow=rectified_flow,
-                                num_steps=opt.num_steps,
-                                num_samples=opt.sample_batch_size,
                             )
                         else:
                             euler_sampler = MyEulerSampler(
                                     rectified_flow=rectified_flow,
-                                    num_steps=opt.num_steps,
-                                    num_samples=opt.sample_batch_size,
                                 )
                                 
                         # Sample method
                         #FIXME we should be using a validatioon small dataset instead
-                        num_samples = opt.sample_batch_size
-                        y =y[:num_samples]
-                        gap_pid = gap_pid[:num_samples]
-                        int_energy = int_energy[:num_samples]
-                        mask = mask[:num_samples]
                         traj1 = euler_sampler.sample_loop(
                             seed=233,
                             y=y,
                             gap= gap_pid,
                             energy=int_energy,
                             mask=mask,
+                            num_samples=num_samples,
+                            num_steps=num_steps,
                             )
                         pts= traj1.x_t
                         trajectory = traj1.trajectories
+                        
+                        make_phys_plots(x, pts, savepath = outf_syn)
                         #Ehistogram(X,pts, y, gap_pid, energy, title=f"Ehist_calopodit_del")
                         #plot_batch_3d(pts, y, gaps=gap_pid, energies= energy, title = "Model sampler_G4")
 
@@ -362,7 +360,6 @@ def train(gpu, opt, output_dir, noises_init):
                 if (epoch + 1) % opt.saveIter == 0:
 
                     if should_diag:
-
 
                         save_dict = {
                             'epoch': epoch,
@@ -420,18 +417,19 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
     parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/')
-    parser.add_argument('--category', default='car')
-    parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
+    parser.add_argument('--category', default='all', help='category of dataset')
+    #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
+    parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
     parser.add_argument('--bs', type=int, default=256, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)
     parser.add_argument("--num_classes", type=int, default=0, help=("Number of primary particles used in simulated data"),)
-    parser.add_argument("--gap_classes", type=int, default=2, help=("Number of calorimeter materials used in simulated data"),)
+    parser.add_argument("--gap_classes", type=int, default=0, help=("Number of calorimeter materials used in simulated data"),)
     
     '''model'''
-    parser.add_argument("--model_name", type=str, default="pvcnn2", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
+    parser.add_argument("--model_name", type=str, default="calopodit", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
     parser.add_argument('--beta_start', default=0.0001)
     parser.add_argument('--beta_end', default=0.02)
     parser.add_argument('--schedule_type', default='linear')
@@ -444,9 +442,9 @@ def parse_args():
     parser.add_argument("--train_time_distribution", type=str, default="uniform", help="Distribution of the training time samples. Choose between ['uniform', 'lognormal', 'u_shaped'].")
     parser.add_argument("--train_time_weight", type=str, default="uniform", help="Weighting of the training time samples. Choose between ['uniform'].")
     parser.add_argument("--criterion", type=str, default="mse", help="Criterion for the rectified flow. Choose between ['mse', 'l1', 'lpips'].")
-    parser.add_argument("--num_steps", type=int, default=100, help=(
+    parser.add_argument("--num_steps", type=int, default=1000, help=(
             "Number of steps for generation. Used in training Reflow and/or evaluation"),)
-    parser.add_argument("--sample_batch_size", type=int, default=4, help="Batch size (per device) for sampling images.",)
+    parser.add_argument("--sample_batch_size", type=int, default=100, help="Batch size (per device) for sampling images.",)
 
     #params
     parser.add_argument('--attention', default=True)
@@ -483,10 +481,10 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', default=4, help='unit: epoch')
-    parser.add_argument('--diagIter', default=4, help='unit: epoch')
-    parser.add_argument('--vizIter', default=4, help='unit: epoch')
-    parser.add_argument('--print_freq', default=4, help='unit: iter')
+    parser.add_argument('--saveIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--diagIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--vizIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--print_freq', type=int, default=8, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
 

@@ -11,6 +11,9 @@ from rectified_flow.samplers import EulerSampler
 from rectified_flow.flow_components.loss_function import RectifiedFlowLossFunction
 import numpy as np
 import torch.nn.functional as F
+import awkward as ak
+from phys_plotting import plot_paper_plots
+
 
 def get_betas(schedule_type, b_start, b_end, time_num):
     if schedule_type == 'linear':
@@ -185,9 +188,8 @@ class MyEulerSampler(Sampler):
         v_t = self.rectified_flow.get_velocity(x_t=x_t, t=t, **model_kwargs)
         # Update the state using the Euler formula
         self.x_t = self.x_t + (t_next - t) * v_t     
-        #NOTE: If using a mask, force the padded points 
+
         # in self.x_t to stay at 0 so they don't drift during sampling
-        
         if "mask" in model_kwargs and model_kwargs["mask"] is not None:
             mask = model_kwargs["mask"].unsqueeze(-1).to(self.x_t.device)
             self.x_t = self.x_t * mask
@@ -244,3 +246,44 @@ class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
             loss = loss + (self.energy_weight * physics_loss)
 
         return loss
+
+def make_phys_plots(real, gen, material_list=["G4_W"], savepath="./Phys_plots/"):
+    #TODO read the gap_pid and pass it to the plotting function
+    material = material_list[0]
+    gen_dict = {
+        "x": [],
+        "y": [],
+        "z": [],
+        "energy": []
+    }
+    data_dict = {
+        "x": [],
+        "y": [],
+        "z": [],
+        "energy": [],
+    }
+    for i in range(gen.shape[0]):
+        x, y, z, e = real[i].T
+        xg, yg, zg, eg = gen[i].T
+
+
+        gen_dict["x"].append(zg)
+        gen_dict["z"].append(xg)
+        gen_dict["y"].append(yg)
+        gen_dict["energy"].append(eg)
+
+        data_dict["x"].append(z)
+        data_dict["z"].append(x)
+        data_dict["y"].append(y)
+        data_dict["energy"].append(e)
+                
+        ak_array_truth = ak.Array(data_dict)
+        ak_array_gen = ak.Array(gen_dict)
+
+    fig = plot_paper_plots(
+            [ak_array_truth, ak_array_gen],
+            labels=["Ground Truth", "Generated"],
+            colors=["lightgrey", "cornflowerblue"], material=material
+        )
+        #fig.savefig(f"Plots/{filename}_{material}.pdf", dpi=300)
+    fig.savefig(f"{savepath}/phys_metrics.png", dpi=300)

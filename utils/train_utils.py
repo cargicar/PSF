@@ -250,6 +250,38 @@ class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
             loss = loss + (self.energy_weight * physics_loss)
 
         return loss
+    
+def masked_chamfer_4d(pc_pred, pc_gt, mask):
+    """
+    pc_pred: [B, 4, N] (Reconstructed)
+    pc_gt:   [B, 4, N] (Ground Truth padded)
+    mask:    [B, N]    (1 for real points, 0 for padded)
+    """
+    # Transpose to [B, N, 4] for distance calculation
+    pc_pred = pc_pred.transpose(1, 2)
+    pc_gt = pc_gt.transpose(1, 2)
+    
+    # Calculate pairwise 4D squared distance: [B, N, N]
+    # dist[b, i, j] is the distance between pred_point_i and gt_point_j
+    dist_matrix = torch.cdist(pc_pred, pc_gt, p=2)**2
+    
+    # Masking: We only care about distances to REAL ground truth points
+    # For pred -> gt: ignore columns where mask is 0
+    # For gt -> pred: ignore rows where mask is 0
+    
+    # 1. Prediction to Ground Truth (forward)
+    # Set distances to padded GT points to infinity so they aren't picked as 'min'
+    dist_to_gt = dist_matrix.masked_fill(mask.unsqueeze(1) == 0, float('inf'))
+    min_dist_to_gt, _ = torch.min(dist_to_gt, dim=2) # [B, N]
+    # Ignore the min_dist of padded predicted points
+    loss_forward = (min_dist_to_gt * mask).sum(dim=1) / mask.sum(dim=1)
+
+    # 2. Ground Truth to Prediction (backward)
+    # We only care about the distance from REAL GT points to the reconstruction
+    min_dist_from_gt, _ = torch.min(dist_matrix, dim=1) # [B, N]
+    loss_backward = (min_dist_from_gt * mask).sum(dim=1) / mask.sum(dim=1)
+    
+    return (loss_forward + loss_backward).mean()
 
 def masked_chamfer_distance(pc_a, pc_b, mask_a, mask_b):
     """

@@ -10,7 +10,7 @@ from utils.file_utils import *
 from utils.visualize import *
 from utils.train_utils import *
 
-from models.calladito import LatentDiT
+from models.calladito import DiTConfig, LatentDiT
 import torch.distributed as dist
 
 
@@ -94,24 +94,14 @@ def train(gpu, opt, output_dir, noises_init):
     if opt.model_name == 'calladito':
         #TODO clean up this config. Delet unused params and add new useful ones.
         DiT_config = DiTConfig(
-            #Point transformer config
-            k = 16,
-            nblocks =  4,
-            name= "calopodit",
-            num_points = opt.npoints,
-            energy_cond = True,#opt.energy_cond,
-            in_features=opt.nc,
-            transformer_features = 128, #512 = hidden_size in current implementation
-            #DiT config
-            num_classes = opt.num_classes if hasattr(opt, 'num_classes') else 0,
-            gap_classes = opt.gap_classes if hasattr(opt, 'gap_classes') else 0,
-            out_channels=4, #opt.out_channels,
-            hidden_size=128,
-            depth=13,
-            num_heads=8,
-            mlp_ratio=4,
-            use_long_skip=True,
-            final_conv=False,
+            name= "calladito",
+            input_dim= 512,
+            hidden_size= 1024,
+            depth= 13,
+            num_heads= 16,
+            num_particle_classes= 0,# 2,
+            gap_classes= 0,#4,
+            in_features= 4, #4 channels: x,y,z,E 
         )
         model = LatentDiT(DiT_config)
     else:

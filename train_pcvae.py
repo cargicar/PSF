@@ -88,7 +88,8 @@ def validate(gpu, opt, model, val_loader, save_samples = False):
         pcs_recon, mu, logvar = model(x, mask)
         
         # Calculate losses using the masked Chamfer function from before
-        recon_loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
+        #recon_loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
+        recon_loss = masked_chamfer_4d(x, pcs_recon, mask, mask)
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
         
         total_recon_loss += recon_loss.item()
@@ -238,7 +239,8 @@ def train(gpu, opt, output_dir, noises_init):
                     pcs_recon, mu, logvar = model(x, mask)
                     
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
-                    loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
+                    #loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
+                    loss = masked_chamfer_4d(x, pcs_recon, mask)
                     #  KL Divergence Loss
                     kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
                     

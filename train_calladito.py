@@ -9,8 +9,8 @@ from torch.distributions import Normal
 from utils.file_utils import *
 from utils.visualize import *
 from utils.train_utils import *
-from model.pvcnn_generation import PVCNN2Base
-from model.calopodit import DiT, DiTConfig
+
+from models.calladito import LatentDiT
 import torch.distributed as dist
 
 
@@ -20,31 +20,6 @@ from rectified_flow.rectified_flow import RectifiedFlow
 from contextlib import contextmanager
 import torch.profiler
 from functools import partial
-
-
-class PVCNN2(PVCNN2Base):
-    sa_blocks = [
-        ((32, 2, 32), (1024, 0.1, 32, (32, 64))),
-        ((64, 3, 16), (256, 0.2, 32, (64, 128))),
-        ((128, 3, 8), (64, 0.4, 32, (128, 256))),
-        (None, (16, 0.8, 32, (256, 256, 512))),
-    ]
-    fp_blocks = [
-        ((256, 256), (256, 3, 8)),
-        ((256, 256), (256, 3, 8)),
-        ((256, 128), (128, 2, 16)),
-        ((128, 128, 64), (64, 2, 32)),
-    ]
-
-    def __init__(self, num_classes, embed_dim, use_att,dropout, extra_feature_channels=3, width_multiplier=1,
-                 voxel_resolution_multiplier=1):
-        super().__init__(
-            num_classes=num_classes, embed_dim=embed_dim, use_att=use_att,
-            dropout=dropout, extra_feature_channels=extra_feature_channels,
-            width_multiplier=width_multiplier, voxel_resolution_multiplier=voxel_resolution_multiplier
-        )
-
-
 
 @contextmanager
 def profile(enable_profiling, record_shapes=True, tensor_board=True, output_dir="profiling"):
@@ -76,6 +51,7 @@ def profiler_table_output(prof, output_filename="profiling/cuda_memory_profile.t
         f.write(profiler_table_output)
 
     print(f"Profiler table saved to {output_filename}")
+
 
 @torch.no_grad()
 def validate(gpu, opt, model, val_loader, save_samples = False):
@@ -131,7 +107,6 @@ def validate(gpu, opt, model, val_loader, save_samples = False):
     
     return None, None
 
-
 def train(gpu, opt, output_dir, noises_init):
     debug = False
     set_seed(opt)
@@ -170,14 +145,7 @@ def train(gpu, opt, output_dir, noises_init):
     '''
     #betas = get_betas(opt.schedule_type, opt.beta_start, opt.beta_end, opt.time_num)
     #model = Model(opt, betas, opt.loss_type, opt.model_mean_type, opt.model_var_type)
-
-    if opt.model_name == 'pvcnn2':
-        model = PVCNN2(num_classes=opt.nc, 
-                    embed_dim=opt.embed_dim, 
-                    use_att=opt.attention,
-                    dropout=opt.dropout, 
-                    extra_feature_channels=1) #<--- energy. #NOTE maybe we can add the remaining features as extra channels?? 
-    elif opt.model_name == 'calopodit':
+    if opt.model_name == 'calladito':
         #TODO clean up this config. Delet unused params and add new useful ones.
         DiT_config = DiTConfig(
             #Point transformer config
@@ -199,8 +167,9 @@ def train(gpu, opt, output_dir, noises_init):
             use_long_skip=True,
             final_conv=False,
         )
-        model = DiT(DiT_config)
-    
+        model = LatentDiT(DiT_config)
+    else:
+        raise NotImplementedError(f"Model {opt.model_name} not implemented yet.")
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
         def _transform_(m):
             return nn.parallel.DistributedDataParallel(
@@ -276,20 +245,6 @@ def train(gpu, opt, output_dir, noises_init):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         x, mask, int_energy, y, gap_pid, idx = data
                         
-                        # x_pc = x[:,:,:3]
-                        # outf_syn = f"/global/homes/c/ccardona/PSF"
-                        # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                        #                        x_pc, None, None,
-                        #                        None)
-                        if opt.model_name == "pvcnn2":
-                            x = x.transpose(1,2)
-                        #noises_batch = noises_init[list(idx)].transpose(1,2)
-                    elif opt.dataname == 'shapenet':
-                        x = data['train_points']
-                        if opt.model_name == "pvcnn2":      
-                            x = x.transpose(1,2)
-                        #noises_batch = noises_init[data['idx']].transpose(1,2)
-                    
                     if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
                         x = x.cuda(gpu,  non_blocking=True)
                         mask = mask.cuda(gpu,  non_blocking=True)

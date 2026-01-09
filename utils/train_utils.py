@@ -5,13 +5,14 @@ from datasets.shapenet_data_pc import ShapeNet15kPointClouds
 from datasets.g4_pc_dataset import LazyPklDataset
 #from datasets.idl_dataset import ECAL_Chunked_Dataset as IDLDataset
 from datasets.idl_dataset import LazyIDLDataset as IDLDataset
-from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose
+from datasets.transforms import MinMaxNormalize, CentroidNormalize, Compose, NormalizePC4D
 from rectified_flow.samplers.base_sampler import Sampler
 from rectified_flow.samplers import EulerSampler
 from rectified_flow.flow_components.loss_function import RectifiedFlowLossFunction
 import numpy as np
 import torch.nn.functional as F
 import awkward as ak
+import matplotlib.pyplot as plt
 from phys_plotting import plot_paper_plots
 
 
@@ -90,7 +91,9 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
         test_dataset = None
         #te_dataset = LazyPklDataset(os.path.join(dataroot, 'val'), transform
     elif name == 'idl':
-        dataset = IDLDataset(dataroot)#, max_seq_length=npoints, ordering='spatial', material_list=["G4_W", "G4_Ta", "G4_Pb"], inference_mode=False)
+        transform = NormalizePC4D()
+        print(f"warning: using hardcoded E_MIN and E_MAX for energy normalization")
+        dataset = IDLDataset(dataroot, transform=transform)#, max_seq_length=npoints, ordering='spatial', material_list=["G4_W", "G4_Ta", "G4_Pb"], inference_mode=False)
         train_dataset = dataset
         test_dataset = None
     return train_dataset, test_dataset
@@ -247,6 +250,62 @@ class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
 
         return loss
 
+def masked_chamfer_distance(pc_a, pc_b, mask_a, mask_b):
+    """
+    pc_a, pc_b: [B, 4, N] (4th dim is Energy)
+    mask_a, mask_b: [B, N] (1 for real, 0 for padded)
+    """
+    # Reshape for broadcasting: [B, N, 1, 4] and [B, 1, N, 4]
+    pc_a = pc_a.transpose(1, 2).unsqueeze(2) 
+    pc_b = pc_b.transpose(1, 2).unsqueeze(1)
+    
+    # Compute squared Euclidean distance in 4D space
+    # dist shape: [B, N, N]
+    dist = torch.sum((pc_a - pc_b) ** 2, dim=-1)
+    
+    # MASKING: We want to ignore distances involving padded points.
+    # For the min() operation, set padded distances to infinity.
+    mask_2d = mask_a.unsqueeze(2) * mask_b.unsqueeze(1) # [B, N, N]
+    dist_masked = dist.masked_fill(mask_2d == 0, float('inf'))
+    
+    # Distance from A to B: min distance for each point in A to any point in B
+    dist_a_to_b, _ = torch.min(dist_masked, dim=2) # [B, N]
+    # Distance from B to A: min distance for each point in B to any point in A
+    dist_b_to_a, _ = torch.min(dist_masked, dim=1) # [B, N]
+    
+    # Apply 1D mask to ignore the 'inf' values of padded points in the final sum
+    dist_a_to_b = dist_a_to_b.masked_fill(mask_a == 0, 0.0)
+    dist_b_to_a = dist_b_to_a.masked_fill(mask_b == 0, 0.0)
+    
+    # Average over real points only
+    loss = (dist_a_to_b.sum(dim=1) / mask_a.sum(dim=1) + 
+            dist_b_to_a.sum(dim=1) / mask_b.sum(dim=1))
+    
+    return loss.mean()
+
+
+
+def plot_4d_reconstruction(original, reconstructed, savepath=".reconstructed.png", index=0):
+    # original/reconstructed: [B, 4, N]
+    orig = original[index].cpu().numpy() # [4, N]
+    recon = reconstructed[index].cpu().numpy() # [4, N]
+
+    fig = plt.figure(figsize=(12, 6))
+    
+    # Plot Original
+    ax1 = fig.add_subplot(121, projection='3d')
+    sc1 = ax1.scatter(orig[0], orig[1], orig[2], c=orig[3], cmap='viridis', s=2)
+    ax1.set_title("Original (Color=Energy)")
+    
+    # Plot Reconstruction
+    ax2 = fig.add_subplot(122, projection='3d')
+    sc2 = ax2.scatter(recon[0], recon[1], recon[2], c=recon[3], cmap='viridis', s=2)
+    ax2.set_title("Reconstructed")
+    
+    plt.colorbar(sc2, ax=ax2, label='Energy Value')
+    fig.savefig(f"{savepath}", dpi=300)
+    plt.close(fig)
+
 def make_phys_plots(real, gen, material_list=["G4_W"], savepath="./Phys_plots/"):
     #TODO read the gap_pid and pass it to the plotting function
     material = material_list[0]
@@ -287,3 +346,33 @@ def make_phys_plots(real, gen, material_list=["G4_W"], savepath="./Phys_plots/")
         )
         #fig.savefig(f"Plots/{filename}_{material}.pdf", dpi=300)
     fig.savefig(f"{savepath}/phys_metrics.png", dpi=300)
+    plt.close(fig)
+
+##### temporal utils #######
+import torch
+import matplotlib.pyplot as plt
+
+
+def plot_histogram(data_tensor, bins=30, title="Histogram", save_path="histogram.png"):
+    """
+    Takes a tensor of size [npoints] and saves a histogram plot.
+    """
+    # Convert to numpy for matplotlib compatibility
+    data_np = data_tensor.detach().cpu().numpy()
+    
+    # Create the plot
+    plt.hist(data_np, bins=bins, color='skyblue', edgecolor='black', alpha=0.7)
+    plt.title(title)
+    plt.xlabel('Value')
+    plt.ylabel('Frequency')
+    plt.grid(axis='y', alpha=0.3)
+    
+    # Save the figure
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Histogram saved to {save_path}")
+
+# Example usage:
+# n_points = 1000
+# my_tensor = torch.randn(n_points)
+# plot_histogram(my_tensor, title=f"Distribution of {n_points} points")

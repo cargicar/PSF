@@ -1,7 +1,7 @@
 import torch.multiprocessing as mp
 import torch.optim as optim
 import torch.utils.data
-
+from torch.utils.data import Subset
 
 import argparse
 from torch.distributions import Normal
@@ -9,41 +9,20 @@ from torch.distributions import Normal
 from utils.file_utils import *
 from utils.visualize import *
 from utils.train_utils import *
-from model.pvcnn_generation import PVCNN2Base
-from model.calopodit import DiT, DiTConfig
+
+"""import models"""
+#from model.pvcnn_generation import PVCNN2Base
+#from model.calopodit import DiT, DiTConfig
+from models.PCVAE import PointCloud4DVAE
 import torch.distributed as dist
 
 
 #from rectified_flow.models.dit import DiT, DiTConfig
-from rectified_flow.rectified_flow import RectifiedFlow
+#from rectified_flow.rectified_flow import RectifiedFlow
 #from rectified_flow.flow_components.loss_function import RectifiedFlowLossFunction
 from contextlib import contextmanager
 import torch.profiler
 from functools import partial
-
-
-class PVCNN2(PVCNN2Base):
-    sa_blocks = [
-        ((32, 2, 32), (1024, 0.1, 32, (32, 64))),
-        ((64, 3, 16), (256, 0.2, 32, (64, 128))),
-        ((128, 3, 8), (64, 0.4, 32, (128, 256))),
-        (None, (16, 0.8, 32, (256, 256, 512))),
-    ]
-    fp_blocks = [
-        ((256, 256), (256, 3, 8)),
-        ((256, 256), (256, 3, 8)),
-        ((256, 128), (128, 2, 16)),
-        ((128, 128, 64), (64, 2, 32)),
-    ]
-
-    def __init__(self, num_classes, embed_dim, use_att,dropout, extra_feature_channels=3, width_multiplier=1,
-                 voxel_resolution_multiplier=1):
-        super().__init__(
-            num_classes=num_classes, embed_dim=embed_dim, use_att=use_att,
-            dropout=dropout, extra_feature_channels=extra_feature_channels,
-            width_multiplier=width_multiplier, voxel_resolution_multiplier=voxel_resolution_multiplier
-        )
-
 
 
 @contextmanager
@@ -76,6 +55,7 @@ def profiler_table_output(prof, output_filename="profiling/cuda_memory_profile.t
         f.write(profiler_table_output)
 
     print(f"Profiler table saved to {output_filename}")
+    
 
 @torch.no_grad()
 def validate(gpu, opt, model, val_loader, save_samples = False):
@@ -89,9 +69,6 @@ def validate(gpu, opt, model, val_loader, save_samples = False):
     for i, data in enumerate(val_loader):
         if opt.dataname == 'g4' or opt.dataname == 'idl':
             x, mask, int_energy, y, gap_pid, idx = data
-            #TODO check if transpose is needed
-            #TODO I have not normalized pcs yet. this might be needed for chamfer distance and stability of the model.
-            #TODO we still bed to validate the encode decoder by taking ecoding, passing trought decoder and comparing phys metrics over simulations 
         x = x.transpose(1,2)
         
         if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
@@ -131,7 +108,6 @@ def validate(gpu, opt, model, val_loader, save_samples = False):
     
     return None, None
 
-
 def train(gpu, opt, output_dir, noises_init):
     debug = False
     set_seed(opt)
@@ -164,43 +140,24 @@ def train(gpu, opt, output_dir, noises_init):
     train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
     dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=partial(pad_collate_fn, max_particles= train_dataset.max_particles))
 
+    ## TODO create validation dataset. Using a portion of the training data for now
+    subset_size = 10
+    # indices = list(range(subset_size)) # First 1000
+    indices = np.random.choice(len(train_dataset), subset_size, replace=False) # Random 
+    train_subset = Subset(train_dataset, indices)
+    # 4. Pass the SUBSET to your existing dataloader function
+    val_loader, _, train_sampler, _ = get_dataloader(opt, train_subset,test_dataset=None, 
+        collate_fn=partial(pad_collate_fn, max_particles=train_dataset.max_particles))
 
     '''
     create networks
     '''
     #betas = get_betas(opt.schedule_type, opt.beta_start, opt.beta_end, opt.time_num)
     #model = Model(opt, betas, opt.loss_type, opt.model_mean_type, opt.model_var_type)
-
-    if opt.model_name == 'pvcnn2':
-        model = PVCNN2(num_classes=opt.nc, 
-                    embed_dim=opt.embed_dim, 
-                    use_att=opt.attention,
-                    dropout=opt.dropout, 
-                    extra_feature_channels=1) #<--- energy. #NOTE maybe we can add the remaining features as extra channels?? 
-    elif opt.model_name == 'calopodit':
-        #TODO clean up this config. Delet unused params and add new useful ones.
-        DiT_config = DiTConfig(
-            #Point transformer config
-            k = 16,
-            nblocks =  4,
-            name= "calopodit",
-            num_points = opt.npoints,
-            energy_cond = True,#opt.energy_cond,
-            in_features=opt.nc,
-            transformer_features = 128, #512 = hidden_size in current implementation
-            #DiT config
-            num_classes = opt.num_classes if hasattr(opt, 'num_classes') else 0,
-            gap_classes = opt.gap_classes if hasattr(opt, 'gap_classes') else 0,
-            out_channels=4, #opt.out_channels,
-            hidden_size=128,
-            depth=13,
-            num_heads=8,
-            mlp_ratio=4,
-            use_long_skip=True,
-            final_conv=False,
-        )
-        model = DiT(DiT_config)
-    
+    if opt.model_name == 'pc4dvae':
+        model = PointCloud4DVAE(latent_dim=opt.latent_dim)
+    else:
+        print(f"Model name {opt.model_name} not implemented.")
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
         def _transform_(m):
             return nn.parallel.DistributedDataParallel(
@@ -242,30 +199,13 @@ def train(gpu, opt, output_dir, noises_init):
     else:
         start_epoch = 0
 
-    # def new_x_chain(x, num_chain):
-    #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
-    #Rectified_Flow
-    #rf_criterion = RectifiedFlowLossFunction(loss_type = "mse")
-    rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 0.1)
-    
-    data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
-    rectified_flow = RectifiedFlow(
-        data_shape=data_shape,
-        interp=opt.interp,
-        source_distribution=opt.source_distribution,
-        is_independent_coupling=opt.is_independent_coupling,
-        train_time_distribution=opt.train_time_distribution,
-        train_time_weight=opt.train_time_weight,
-        criterion=rf_criterion, #opt.criterion,
-        velocity_field=model,
-        #device=accelerator.device,
-        dtype=torch.float32,
-    )
     ##################################################################################
     ''' training '''
     ##################################################################################
     profiling = opt.enable_profiling
     out_prof = None
+    beta = opt.kl_beta
+
     with profile(profiling, output_dir=out_prof) as prof:
         with torch.profiler.record_function("train_trace"):   
             for epoch in range(start_epoch, opt.niter):
@@ -275,19 +215,10 @@ def train(gpu, opt, output_dir, noises_init):
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         x, mask, int_energy, y, gap_pid, idx = data
-                        
-                        # x_pc = x[:,:,:3]
-                        # outf_syn = f"/global/homes/c/ccardona/PSF"
-                        # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                        #                        x_pc, None, None,
-                        #                        None)
-                        if opt.model_name == "pvcnn2":
-                            x = x.transpose(1,2)
-                        #noises_batch = noises_init[list(idx)].transpose(1,2)
+                        x = x.transpose(1,2)
                     elif opt.dataname == 'shapenet':
                         x = data['train_points']
-                        if opt.model_name == "pvcnn2":      
-                            x = x.transpose(1,2)
+                        mask = None
                         #noises_batch = noises_init[data['idx']].transpose(1,2)
                     
                     if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
@@ -304,30 +235,18 @@ def train(gpu, opt, output_dir, noises_init):
                         gap_pid = gap_pid.cuda()
                         int_energy = int_energy.cuda()
                         #noises_batch = noises_batch.cuda()
+                    pcs_recon, mu, logvar = model(x, mask)
                     
-                    rectified_flow.device = x.device      
-                    
-                    x_0 = rectified_flow.sample_source_distribution(x.shape[0])
-                    if opt.model_name == "pvcnn2":
-                        x_0 = x_0.transpose(1,2)
-                    t = rectified_flow.sample_train_time(x.shape[0])
-                    t= t.squeeze()
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
-                    loss = rectified_flow.get_loss(
-                                x_0=x_0,
-                                x_1=x,
-                                y= y,
-                                gap= gap_pid,
-                                energy=int_energy,
-                                t=t,
-                                mask = mask,
-                            )
+                    loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
+                    #  KL Divergence Loss
+                    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
+                    
+                    # Total Loss
+                    loss = loss + beta * kl_loss
+                    
                     optimizer.zero_grad()
                     loss.backward()
-                    #netpNorm, netgradNorm = getGradNorm(model)
-                    #if opt.grad_clip is not None:
-                    #    torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
-
                     optimizer.step()
                     if prof is not None:
                         prof.step()
@@ -339,85 +258,24 @@ def train(gpu, opt, output_dir, noises_init):
                                 epoch, opt.niter, i, len(dataloader),loss.item()
                                 ))
 
-                
-                
                 if (epoch + 1) % opt.vizIter == 0 and should_diag:
-                    logger.info('Generation: eval')
-
+                    logger.info('eval')
+                    #TODO add validation loader
+                    #val_loader = dataloader
+                    #pcs, gen = validate(gpu, opt, model, val_loader)
                     model.eval()
-                    #x = x
-                    #TODO CFG has to be done here
-                    num_samples=opt.bs
-                    num_steps = opt.num_steps
                     with torch.no_grad():
-                        if opt.model_name == "pvcnn2":
-                            euler_sampler = MyEulerSamplerPVCNN(
-                                rectified_flow=rectified_flow,
-                            )
-                        else:
-                            euler_sampler = MyEulerSampler(
-                                    rectified_flow=rectified_flow,
-                                )
-                                
-                        # Sample method
-                        #FIXME we should be using a validatioon small dataset instead
-                        traj1 = euler_sampler.sample_loop(
-                            seed=233,
-                            y=y,
-                            gap= gap_pid,
-                            energy=int_energy,
-                            mask=mask,
-                            num_samples=num_samples,
-                            num_steps=num_steps,
-                            )
-                        pts= traj1.x_t
-                        trajectory = traj1.trajectories
-                        
-                        #Ehistogram(X,pts, y, gap_pid, energy, title=f"Ehist_calopodit_del")
-                        #plot_batch_3d(pts, y, gaps=gap_pid, energies= energy, title = "Model sampler_G4")
-
-                        #cf = chamfer_distance(X, pts, squared=True)
-                        #print(f"Chamfer Batch AVG Distance calopodit sampler: {cf.item():.6f}")
-                
-
-                        # x_gen_eval = model.gen_samples(new_x_chain(x, 25).shape, x.device, clip_denoised=False)
-                        # x_gen_list = model.gen_sample_traj(new_x_chain(x, 1).shape, x.device, freq=40, clip_denoised=False)
-                        # x_gen_all = torch.cat(x_gen_list, dim=0)
-
-                        # gen_stats = [x_gen_eval.mean(), x_gen_eval.std()]
-                        # gen_eval_range = [x_gen_eval.min().item(), x_gen_eval.max().item()]
-
-                        # logger.info('      [{:>3d}/{:>3d}]  '
-                        #              'eval_gen_range: [{:>10.4f}, {:>10.4f}]     '
-                        #              'eval_gen_stats: [mean={:>10.4f}, std={:>10.4f}]      '
-                        #     .format(
-                        #     epoch, opt.niter,
-                        #     *gen_eval_range, *gen_stats,
-                            # ))
-                    if debug:
-                        ######### Offload Plotting to a CPU Thread ######
-                        # import threading
-                        # def save_plots_async(x, pts, path):
-                        #     make_phys_plots(x, pts, savepath=path)
-
-                        # # Inside the diag block:
-                        # pts_cpu = pts.detach().cpu()
-                        # x_cpu = x.detach().cpu()
-                        # thread = threading.Thread(target=save_plots_async, args=(x_cpu, pts_cpu, outf_syn))
-                        # thread.start()
-                        visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                                                trajectory, None, None,
-                                                None)
-
-                        visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
-                                                pts, None,
+                        plot_4d_reconstruction(x, pcs_recon, savepath=f"{outf_syn}/reconstruction.png", index=0)
+                    if debug and pcs is not None and gen is not None:
+                        visualize_pointcloud_batch('%s/epoch_%03d_samples_gen.png' % (outf_syn, epoch),
+                                                gen, None,
                                                 None,
                                                 None)
 
-                        visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x, None,
+                        visualize_pointcloud_batch('%s/epoch_%03d_samples_sim.png' % (outf_syn, epoch), pcs, None,
                                                     None,
                                                     None)
-                        make_phys_plots(x, pts, savepath = outf_syn)
+                        #make_phys_plots(pcs, gen, savepath = outf_syn)
                     logger.info('Generation: train')
                     model.train()
                     
@@ -484,40 +342,22 @@ def parse_args():
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=256, help='input batch size')
-    parser.add_argument('--workers', type=int, default=16, help='workers')
-    parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
+    parser.add_argument('--bs', type=int, default=512, help='input batch size')
+    parser.add_argument('--workers', type=int, default=32, help='workers')
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)
     parser.add_argument("--num_classes", type=int, default=0, help=("Number of primary particles used in simulated data"),)
     parser.add_argument("--gap_classes", type=int, default=0, help=("Number of calorimeter materials used in simulated data"),)
-    
+    parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     '''model'''
-    parser.add_argument("--model_name", type=str, default="calopodit", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
-    parser.add_argument('--beta_start', default=0.0001)
-    parser.add_argument('--beta_end', default=0.02)
+    parser.add_argument("--model_name", type=str, default="pc4dvae", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
+    parser.add_argument('--kl_beta', default=0.001)
     parser.add_argument('--schedule_type', default='linear')
-    parser.add_argument('--time_num', default=1000)
+    '''encoder decoder'''
+    parser.add_argument('--latent_dim',  type=int, default=512)
     
-    '''Flow'''
-    parser.add_argument("--interp", type=str, default="straight", help="Interpolation method for the rectified flow. Choose between ['straight', 'slerp', 'ddim'].")
-    parser.add_argument("--source_distribution", type=str, default="normal", help="Distribution of the source samples. Choose between ['normal'].")
-    parser.add_argument("--is_independent_coupling", type=bool, default=True,help="Whether training 1-Rectified Flow")
-    parser.add_argument("--train_time_distribution", type=str, default="uniform", help="Distribution of the training time samples. Choose between ['uniform', 'lognormal', 'u_shaped'].")
-    parser.add_argument("--train_time_weight", type=str, default="uniform", help="Weighting of the training time samples. Choose between ['uniform'].")
-    parser.add_argument("--criterion", type=str, default="mse", help="Criterion for the rectified flow. Choose between ['mse', 'l1', 'lpips'].")
-    parser.add_argument("--num_steps", type=int, default=1000, help=(
-            "Number of steps for generation. Used in training Reflow and/or evaluation"),)
-    parser.add_argument("--sample_batch_size", type=int, default=100, help="Batch size (per device) for sampling images.",)
-
     #params
-    parser.add_argument('--attention', default=True)
-    parser.add_argument('--dropout', default=0.1)
-    parser.add_argument('--embed_dim', type=int, default=64)
-    parser.add_argument('--loss_type', default='mse')
-    parser.add_argument('--model_mean_type', default='eps')
-    parser.add_argument('--model_var_type', default='fixedsmall')
-
+    
     parser.add_argument('--lr', type=float, default=2e-4, help='learning rate for E, default=0.0002')
     parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
     parser.add_argument('--decay', type=float, default=0, help='weight decay for EBM')
@@ -545,10 +385,10 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--saveIter', type=int, default=80, help='unit: epoch')
     parser.add_argument('--diagIter', type=int, default=8, help='unit: epoch')
     parser.add_argument('--vizIter', type=int, default=8, help='unit: epoch')
-    parser.add_argument('--print_freq', type=int, default=8, help='unit: iter')
+    parser.add_argument('--print_freq', type=int, default=16, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
 

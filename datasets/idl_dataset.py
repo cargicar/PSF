@@ -250,6 +250,7 @@ class LazyIDLDataset(Dataset):
         
                 if self.transform:
                     shower = self.transform(shower)
+                    
 
                 # The showers data has shape (N_particles, 4)
                 shower = torch.from_numpy(shower).float()
@@ -260,3 +261,20 @@ class LazyIDLDataset(Dataset):
                 #gap_pid = torch.tensor(gap_pid).long()
             # Return the tensors
             return (shower, initial_energy, pid, gap_pid, idx)
+        
+#load latents from pcvae model
+class LatentDataset(torch.utils.data.Dataset):
+    def __init__(self, latent_file):
+        data = torch.load(latent_file)
+        self.mu = data['mu']
+        self.logvar = data['logvar']
+
+    def __len__(self):
+        return len(self.mu)
+
+    def __getitem__(self, idx):
+        # Sample from the distribution (Reparameterization trick)
+        mu = self.mu[idx]
+        std = torch.exp(0.5 * self.logvar[idx])
+        z = mu + std * torch.randn_like(std)
+        return z

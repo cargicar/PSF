@@ -19,6 +19,39 @@ class Compose:
         for t in self.transforms:
             img = t(img)
         return img
+
+class NormalizePC4D:
+    """
+    pc: [4, N] (x, y, z, E)
+    """
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        coords = x[:3, :] # [3, N]
+        energy = x[3:, :] # [1, N]
+        
+        # TODO: read max e and min energy from somewhere else
+        #NOTE Z-score is probably more robust normalization
+        E_MIN = 0.0
+        E_MAX = 40.0
+
+        # Center and scale spatial coordinates
+        # axis=1 is equivalent to dim=1; keepdims=True is equivalent to keepdim=True
+        centroid = np.mean(coords, axis=1, keepdims=True)
+        coords = coords - centroid
+        
+        # np.linalg.norm is a cleaner way to calculate sqrt(sum(coords**2))
+        m_dist = np.max(np.sqrt(np.sum(coords**2, axis=0)))
+        coords = coords / (m_dist + 1e-6)
+        
+        # Log-scale energy and Min-Max normalize
+        energy = np.log1p(energy) 
+        energy = (energy - E_MIN) / (E_MAX - E_MIN + 1e-6)
+        
+        #NOTE Global Z-score
+        #energy = (energy - e_mean) / (e_std + 1e-6)
+        #energy = energy.unsqueeze(0)
+        # np.concatenate with axis=0 is equivalent to torch.cat with dim=0
+        return np.concatenate([coords, energy], axis=0)    
+    
 class MinMaxNormalize:
     """
     Min-Max normalization transform for PyTorch datasets.

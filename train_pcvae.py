@@ -161,7 +161,7 @@ def train(gpu, opt, output_dir, noises_init):
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
         def _transform_(m):
             return nn.parallel.DistributedDataParallel(
-                m, device_ids=[gpu], output_device=gpu)
+                m, device_ids=[gpu], output_device=gpu)#, find_unused_parameters=True)#TODO find_unused_parameters set True because the query_embed in the transformer encoder set num_point to 2048 and if the pc has less points, then the embedding get unsued parameter. Remeber to set Flase if dynamic queries with pos encoding are used later
 
         torch.cuda.set_device(gpu)
         model.cuda(gpu)
@@ -265,8 +265,8 @@ def train(gpu, opt, output_dir, noises_init):
                     #pcs, gen = validate(gpu, opt, model, val_loader)
                     model.eval()
                     with torch.no_grad():
-                        plot_4d_reconstruction(x, pcs_recon, savepath=f"{outf_syn}/reconstruction.png", index=0)
-                    if debug and pcs is not None and gen is not None:
+                        plot_4d_reconstruction(x, pcs_recon, savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
+                    if debug and x is not None and pcs_recon is not None:
                         visualize_pointcloud_batch('%s/epoch_%03d_samples_gen.png' % (outf_syn, epoch),
                                                 gen, None,
                                                 None,
@@ -342,7 +342,7 @@ def parse_args():
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=512, help='input batch size')
+    parser.add_argument('--bs', type=int, default=256, help='input batch size')
     parser.add_argument('--workers', type=int, default=32, help='workers')
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)
@@ -386,9 +386,9 @@ def parse_args():
 
     '''eval'''
     parser.add_argument('--saveIter', type=int, default=80, help='unit: epoch')
-    parser.add_argument('--diagIter', type=int, default=8, help='unit: epoch')
-    parser.add_argument('--vizIter', type=int, default=8, help='unit: epoch')
-    parser.add_argument('--print_freq', type=int, default=16, help='unit: iter')
+    parser.add_argument('--diagIter', type=int, default=16, help='unit: epoch')
+    parser.add_argument('--vizIter', type=int, default=40, help='unit: epoch')
+    parser.add_argument('--print_freq', type=int, default=32, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
 

@@ -53,60 +53,6 @@ def profiler_table_output(prof, output_filename="profiling/cuda_memory_profile.t
     print(f"Profiler table saved to {output_filename}")
 
 
-@torch.no_grad()
-def validate(gpu, opt, model, val_loader, save_samples = False):
-    model.eval()
-    total_recon_loss = 0
-    total_kl_loss = 0
-    
-    # To store samples for visualization
-    sample_pcs = []
-    sample_recons = []
-    for i, data in enumerate(val_loader):
-        if opt.dataname == 'g4' or opt.dataname == 'idl':
-            x, mask, int_energy, y, gap_pid, idx = data
-            #TODO check if transpose is needed
-            #TODO I have not normalized pcs yet. this might be needed for chamfer distance and stability of the model.
-            #TODO we still bed to validate the encode decoder by taking ecoding, passing trought decoder and comparing phys metrics over simulations 
-        x = x.transpose(1,2)
-        
-        if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
-            x = x.cuda(gpu,  non_blocking=True)
-            mask = mask.cuda(gpu,  non_blocking=True)
-            y = y.cuda(gpu,  non_blocking=True)
-            gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
-            int_energy = int_energy.cuda(gpu,  non_blocking=True)
-            #noises_batch = noises_batch.cuda(gpu)
-        elif opt.distribution_type == 'single':
-            x = x.cuda()
-            mask = mask.cuda()
-            y = y.cuda()
-            gap_pid = gap_pid.cuda()
-            int_energy = int_energy.cuda()
-            #noises_batch = noises_batch.cuda()
-        pcs_recon, mu, logvar = model(x, mask)
-        
-        # Calculate losses using the masked Chamfer function from before
-        recon_loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
-        
-        total_recon_loss += recon_loss.item()
-        total_kl_loss += kl_loss.item()
-
-        # Save the first batch for visual inspection
-        if save_samples and i == 0:
-            sample_pcs.append(x[:4].cpu())       # Original
-            sample_recons.append(pcs_recon[:4].cpu()) # Reconstructed
-
-            return sample_pcs, sample_recons
-
-    avg_recon = total_recon_loss / len(val_loader)
-    avg_kl = total_kl_loss / len(val_loader)
-    
-    print(f"Validation - Recon (Chamfer): {avg_recon:.6f}, KL: {avg_kl:.6f}")
-    
-    return None, None
-
 def train(gpu, opt, output_dir, noises_init):
     debug = False
     set_seed(opt)

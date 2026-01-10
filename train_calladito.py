@@ -20,6 +20,7 @@ from rectified_flow.rectified_flow import RectifiedFlow
 from contextlib import contextmanager
 import torch.profiler
 from functools import partial
+from models.PCVAE import PointCloud4DVAE
 
 @contextmanager
 def profile(enable_profiling, record_shapes=True, tensor_board=True, output_dir="profiling"):
@@ -104,6 +105,9 @@ def train(gpu, opt, output_dir, noises_init):
             in_features= 4, #4 channels: x,y,z,E 
         )
         model = LatentDiT(DiT_config)
+        pcvae = PointCloud4DVAE(latent_dim=DiT_config.input_dim, max_points=train_dataset.max_particles)
+        for param in pcvae.parameters():
+            param.requires_grad = False
     else:
         raise NotImplementedError(f"Model {opt.model_name} not implemented yet.")
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
@@ -151,7 +155,8 @@ def train(gpu, opt, output_dir, noises_init):
     #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
     #Rectified_Flow
     #rf_criterion = RectifiedFlowLossFunction(loss_type = "mse")
-    rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 0.1)
+    #rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 0.1)
+    rf_criterion = "mse"
     
     data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
     rectified_flow = RectifiedFlow(
@@ -195,6 +200,10 @@ def train(gpu, opt, output_dir, noises_init):
                         gap_pid = gap_pid.cuda()
                         int_energy = int_energy.cuda()
                         #noises_batch = noises_batch.cuda()
+                    # Get Latent z1 from VAE (Real Data)
+                    with torch.no_grad():
+                        z1, _ = pcvae.encode(x, mask, int_energy) # [B, 512]
+                    
                     
                     rectified_flow.device = x.device      
                     
@@ -335,6 +344,76 @@ def train(gpu, opt, output_dir, noises_init):
         prof.export_memory_timeline(f"{out_prof}/memory_timeline.html", device=f"cuda:{gpu}")
     profiler_table_output(prof, output_filename=f"{out_prof}/cuda_memory_profile_rank{opt.rank}.txt")
     dist.destroy_process_group()
+
+########## look at this when redoing training ##########
+import torch
+import torch.nn as nn
+
+def train_rectified_flow(vae, dit, dataloader, optimizer, device):
+    """
+    VAE: Frozen pre-trained encoder
+    DiT: The velocity model v(z_t, t)
+    """
+    vae.eval()
+    dit.train()
+    
+    for pcs, masks in dataloader:
+        pcs, masks = pcs.to(device), masks.to(device)
+        
+        # 1. Get Latent z1 from VAE (Real Data)
+        with torch.no_grad():
+            z1, _ = vae.encode(pcs, masks) # [B, 512]
+            
+        # 2. Sample Noise z0
+        z0 = torch.randn_like(z1) # [B, 512]
+        
+        # 3. Sample Timestep t uniformly between 0 and 1
+        t = torch.rand((z1.shape[0],), device=device)
+        t_expand = t.view(-1, 1)
+        
+        # 4. Linear Interpolation (Straight path)
+        # z_t = (1-t)*z0 + t*z1
+        zt = (1 - t_expand) * z0 + t_expand * z1
+        
+        # 5. Predict the Velocity (Direction of the line)
+        # Target is (z1 - z0)
+        target = z1 - z0
+        pred_v = dit(zt, t) # DiT predicts the velocity field
+        
+        # 6. Loss: Mean Squared Error on Velocity
+        loss = F.mse_norm(pred_v, target) # Or standard F.mse_loss
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+@torch.no_grad()
+def sample_rectified_flow(vae, dit, steps=50, num_points=2048, device="cuda"):
+    vae.eval()
+    dit.eval()
+    
+    # 1. Start with Gaussian Noise
+    zt = torch.randn(1, 512).to(device)
+    dt = 1.0 / steps
+    
+    # 2. Euler Integration (Solving the ODE)
+    for i in range(steps):
+        t = torch.full((1,), i / steps, device=device)
+        
+        # Get velocity at current position and time
+        vt = dit(zt, t)
+        
+        # Step forward along the straight line
+        zt = zt + vt * dt
+        
+    # 3. Final Latent to Point Cloud
+    # zt is now roughly z1 (the data distribution)
+    generated_pc = vae.decoder(zt, num_points=num_points)
+    return generated_pc
+#########################################
+
+def mse_norm(pred, target):
+    return torch.mean((pred - target) ** 2)
 
 def main():
     opt = parse_args()

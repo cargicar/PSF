@@ -156,7 +156,7 @@ def train(gpu, opt, output_dir, noises_init):
     #betas = get_betas(opt.schedule_type, opt.beta_start, opt.beta_end, opt.time_num)
     #model = Model(opt, betas, opt.loss_type, opt.model_mean_type, opt.model_var_type)
     if opt.model_name == 'pc4dvae':
-        model = PointCloud4DVAE(latent_dim=opt.latent_dim)
+        model = PointCloud4DVAE(latent_dim=opt.latent_dim, max_points=train_dataset.max_particles)
     else:
         print(f"Model name {opt.model_name} not implemented.")
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
@@ -190,13 +190,13 @@ def train(gpu, opt, output_dir, noises_init):
 
     lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
 
-    if opt.model != '':
-        ckpt = torch.load(opt.model)
+    if opt.model_path != '':
+        ckpt = torch.load(opt.model_path)
         model.load_state_dict(ckpt['model_state'])
         #optimizer.load_state_dict(ckpt['optimizer_state'])
 
-    if opt.model != '':
-        start_epoch = torch.load(opt.model)['epoch'] + 1
+    if opt.model_path != '':
+        start_epoch = torch.load(opt.model_path)['epoch'] + 1
     else:
         start_epoch = 0
 
@@ -215,8 +215,9 @@ def train(gpu, opt, output_dir, noises_init):
                 lr_scheduler.step(epoch)
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
-                        x, mask, int_energy, y, gap_pid, idx = data
+                        x, mask, init_energy, y, gap_pid, idx = data
                         x = x.transpose(1,2)
+                        
                     elif opt.dataname == 'shapenet':
                         x = data['train_points']
                         mask = None
@@ -227,16 +228,16 @@ def train(gpu, opt, output_dir, noises_init):
                         mask = mask.cuda(gpu,  non_blocking=True)
                         y = y.cuda(gpu,  non_blocking=True)
                         gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
-                        int_energy = int_energy.cuda(gpu,  non_blocking=True)
+                        init_energy = init_energy.cuda(gpu,  non_blocking=True)
                         #noises_batch = noises_batch.cuda(gpu)
                     elif opt.distribution_type == 'single':
                         x = x.cuda()
                         mask = mask.cuda()
                         y = y.cuda()
                         gap_pid = gap_pid.cuda()
-                        int_energy = int_energy.cuda()
+                        init_energy = init_energy.cuda()
                         #noises_batch = noises_batch.cuda()
-                    pcs_recon, mu, logvar = model(x, mask)
+                    pcs_recon, mu, logvar = model(x, mask, init_energy)
                     
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
                     #loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
@@ -353,7 +354,7 @@ def parse_args():
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     '''model'''
     parser.add_argument("--model_name", type=str, default="pc4dvae", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
-    parser.add_argument('--kl_beta', default=0.001)
+    parser.add_argument('--kl_beta', default=0.0005)
     parser.add_argument('--schedule_type', default='linear')
     '''encoder decoder'''
     parser.add_argument('--latent_dim',  type=int, default=512)
@@ -366,7 +367,7 @@ def parse_args():
     parser.add_argument('--grad_clip', type=float, default=None, help='weight decay for EBM')
     parser.add_argument('--lr_gamma', type=float, default=0.998, help='lr decay for EBM')
 
-    parser.add_argument('--model', default='', help="path to model (to continue training)")
+    parser.add_argument('--model_path', default='', help="path to model (to continue training)")
 
 
     '''distributed'''
@@ -387,7 +388,7 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', type=int, default=80, help='unit: epoch')
+    parser.add_argument('--saveIter', type=int, default=40, help='unit: epoch')
     parser.add_argument('--diagIter', type=int, default=16, help='unit: epoch')
     parser.add_argument('--vizIter', type=int, default=40, help='unit: epoch')
     parser.add_argument('--print_freq', type=int, default=32, help='unit: iter')

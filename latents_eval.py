@@ -12,76 +12,9 @@ from sklearn.manifold import TSNE
 from utils.train_utils import *
 from datasets.idl_dataset import LazyIDLDataset as IDLDataset
 
-
-def extract_latents(args, device="cuda:0"):
-    # 1. Setup Model
-    # Ensure the latent_dim matches what you used during training
-    model = PointCloud4DVAE(latent_dim=512).to(device)
-    # Load weights
-    checkpoint = torch.load(args.model_path, map_location=device)
-    
-
-    #unwrap ddp model if needed
-    #Create a new state_dict without the 'module.' prefix
-    try:
-        model.load_state_dict(checkpoint['model_state'])
-    except:
-        new_state_dict = OrderedDict()
-        for k, v in checkpoint['model_state'].items():
-            name = k[7:] if k.startswith('module.') else k  # remove 'module.' (7 characters)
-            new_state_dict[name] = v
-    # 4. Load it into your model
-    model.load_state_dict(new_state_dict)
-    model.eval()
-    
-    #  Setup DataLoader (No shuffling needed for extraction)
-
-    dataset = IDLDataset(args.dataroot)
-    #dataloader, _, train_sampler, _ = get_dataloader(args, train_dataset, test_dataset = None, collate_fn=partial(pad_collate_fn, max_particles= train_dataset.max_particles))
-    ## TODO create validation dataset. Using a portion of the training data for now
-    subset_size = args.bs
-    # indices = list(range(subset_size)) # First 1000
-    indices = np.random.choice(len(dataset), subset_size, replace=False) # Random 
-    train_subset = Subset(dataset, indices)        
-    val_loader = DataLoader(train_subset, batch_size=args.bs, pin_memory = True,
-                                num_workers=args.workers, drop_last=True, 
-                                collate_fn=partial(pad_collate_fn, max_particles=dataset.max_particles) )
-
-    
-    #loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4)
-    
-    all_mus = []
-    all_logvars = []
-    print(f"Extracting latents ...")
-    with torch.no_grad():
-        for i, data in enumerate(val_loader):
-            x, mask, int_energy, y, gap_pid, idx = data
-            x = x.transpose(1,2)
-
-            pcs, masks = x.to(device), mask.to(device)
-            
-            # We only need the encoder output
-            mu, logvar = model.encode(pcs, masks)
-            
-            all_mus.append(mu.cpu())
-            all_logvars.append(logvar.cpu())
-        
-        
-    # Concatenate all batches
-    all_mus = torch.cat(all_mus, dim=0)
-    all_logvars = torch.cat(all_logvars, dim=0)
-    savedata = "/pscratch/sd/c/ccardona/datasets/"
-    torch.save({'mu': all_mus, 'logvar': all_logvars}, f"{savedata}pcvae_encoded_w_small_dataset.pt")
-    print(f"Latents extracted and saved to {savedata}pcvae_encoded_w_small_dataset.pt")
-    
-    return all_mus, all_logvars
-
-
-def check_latent_distribution(mus, pcvae_model_path):
+def check_latent_distribution(mus, savepath):
     # mus: [Total_Samples, 512]
     # Reduce to 2D for visualization
-    parent_dir = str(Path(pcvae_model_path).parent)
-    savepath = f"{parent_dir}_latent_tsne.png"
     tsne = TSNE(n_components=2, perplexity=30)
     z_2d = tsne.fit_transform(mus.numpy())
     
@@ -92,16 +25,20 @@ def check_latent_distribution(mus, pcvae_model_path):
     plt.ylabel("Dimension 2")
     plt.savefig(savepath)
 
-def plot_pcvae_reconstruction(args, device="cuda:0"):
+def extract_pcvae_latents_and_reconstruction(args, device="cuda:0"):
     parent_dir = str(Path(args.model_path).parent)
-    savepath = f"{parent_dir}/reconstruction.png"
+    saveplot_parent = f"{parent_dir}/syn/"
+    saveplot = f"{saveplot_parent}reconstruction_eval.png"
+    saveplot_latent = f"{saveplot_parent}/latent_space_eval.png"
+    dataset = IDLDataset(args.dataroot, transform=None)
     # Setup Model
     # Ensure the latent_dim matches what you used during training
-    model = PointCloud4DVAE(latent_dim=512).to(device)
+    #model = PointCloud4DVAE(latent_dim=512).to(device)
+    model = PointCloud4DVAE(latent_dim=args.latent_dim, max_points=dataset.max_particles)
     # Load weights
     checkpoint = torch.load(args.model_path, map_location=device)
-    
-
+    for param in model.parameters():
+        param.requires_grad = False
     #unwrap ddp model if needed
     #Create a new state_dict without the 'module.' prefix
     try:
@@ -111,51 +48,57 @@ def plot_pcvae_reconstruction(args, device="cuda:0"):
         for k, v in checkpoint['model_state'].items():
             name = k[7:] if k.startswith('module.') else k  # remove 'module.' (7 characters)
             new_state_dict[name] = v
-    # 4. Load it into your model
-    model.load_state_dict(new_state_dict)
-    model.eval()
+        model.load_state_dict(new_state_dict)
     model.to(device)
     #  Setup DataLoader (No shuffling needed for extraction)
 
-    dataset = IDLDataset(args.dataroot)
+    
     #dataloader, _, train_sampler, _ = get_dataloader(args, train_dataset, test_dataset = None, collate_fn=partial(pad_collate_fn, max_particles= train_dataset.max_particles))
     ## TODO create validation dataset. Using a portion of the training data for now
     subset_size = args.bs
-    # indices = list(range(subset_size)) # First 1000
-    indices = np.random.choice(len(dataset), subset_size, replace=False) # Random 
+    indices = list(range(subset_size)) # First 1000
+    #indices = np.random.choice(len(dataset), subset_size, replace=False) # Random 
     train_subset = Subset(dataset, indices)        
     val_loader = DataLoader(train_subset, batch_size=args.bs, pin_memory = True,
                                 num_workers=args.workers, drop_last=True, 
                                 collate_fn=partial(pad_collate_fn, max_particles=dataset.max_particles) )
 
-    
+    all_mus = []
+    all_logvars = []
     #loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4)
-    
+    #model.eval()
     with torch.no_grad():
         for i, data in enumerate(val_loader):
-            x, mask, int_energy, y, gap_pid, idx = data
+            x, mask, init_energy, y, gap_pid, idx = data
             x = x.transpose(1,2)
+            x, mask, init_energy= x.to(device), mask.to(device), init_energy.to(device)
+            pcs_recon, mu, logvar = model(x, mask, init_energy)
+            # collect lantents
+            all_mus.append(mu.cpu())
+            all_logvars.append(logvar.cpu())
+        #plot one example
+        plot_4d_reconstruction(x, pcs_recon, saveplot, index=0)
+        print(f"Plot save to {saveplot}")
+    # Concatenate all batches
+    all_mus = torch.cat(all_mus, dim=0)
+    all_logvars = torch.cat(all_logvars, dim=0)
+    #latent space visualization
 
-            x, mask = x.to(device), mask.to(device)
-            # We only need the encoder output
-            pcs_recon, mu, logvar = model(x, mask)
-            #plot_4d_reconstruction(original, reconstructed, savepath, index=0):
-            plot_4d_reconstruction(x.cpu(), pcs_recon.cpu(), savepath, index=1)
-            
-    print(f"Latents extracted and saved to {savepath}pcvae_encoded_w_small_dataset.pt")
-    
+    check_latent_distribution(all_mus, saveplot_latent)
+    #save in dataser folders
+    savedata = "/pscratch/sd/c/ccardona/datasets/"
+    torch.save({'mu': all_mus, 'logvar': all_logvars}, f"{savedata}pcvae_encoded_w_small_dataset_BN.pt")
+    print(f"Latents extracted and saved to {savedata}pcvae_encoded_w_small_dataset_BN.pt")    
     
 
 
 def main():
     #TODO yhis could be easily wrapped on ddp
     args = parse_args()
-    #all_mus, all_logvars = extract_latents(args)
-    #check_latent_distribution(all_mus,args.model_path)
-    plot_pcvae_reconstruction(args, device="cuda:0")
+    extract_pcvae_latents_and_reconstruction(args, device="cuda:0")
     print("Latent space visualization saved.")
-# If you see distinct clusters or a smooth manifold, your VAE is ready.
-# If you see a single exploded cloud, check your KL Divergence weight.
+    # If you see distinct clusters or a smooth manifold, your VAE is ready.
+    # If you see a single exploded cloud, check your KL Divergence weight.
 
 def parse_args():
 
@@ -169,6 +112,7 @@ def parse_args():
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
+    parser.add_argument('--latent_dim',  type=int, default=512)
     parser.add_argument('--bs', type=int, default=256, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')

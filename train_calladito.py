@@ -5,6 +5,7 @@ import torch.utils.data
 
 import argparse
 from torch.distributions import Normal
+from collections import OrderedDict
 
 from utils.file_utils import *
 from utils.visualize import *
@@ -105,15 +106,28 @@ def train(gpu, opt, output_dir, noises_init):
             in_features= 4, #4 channels: x,y,z,E 
         )
         model = LatentDiT(DiT_config)
-        pcvae = PointCloud4DVAE(latent_dim=DiT_config.input_dim, max_points=train_dataset.max_particles)
+        latent_dim=DiT_config.input_dim
+        pcvae = PointCloud4DVAE(latent_dim=latent_dim, max_points=train_dataset.max_particles)
+        checkpoint = torch.load(opt.pcvae_model)
         for param in pcvae.parameters():
             param.requires_grad = False
+        try:
+            pcvae.load_state_dict(checkpoint['model_state'])
+        except:
+            new_state_dict = OrderedDict()
+            for k, v in checkpoint['model_state'].items():
+                name = k[7:] if k.startswith('module.') else k  # remove 'module.' (7 characters)
+                new_state_dict[name] = v
+            pcvae.load_state_dict(new_state_dict)
+        #pcvae.to(device)
+    #  Setup DataLoader (No shuffling needed for extraction)
+
     else:
         raise NotImplementedError(f"Model {opt.model_name} not implemented yet.")
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
         def _transform_(m):
             return nn.parallel.DistributedDataParallel(
-                m, device_ids=[gpu], output_device=gpu)
+                m, device_ids=[gpu], output_device=gpu, find_unused_parameters=True)#TODO check if find_unused_parameters is needed
 
         torch.cuda.set_device(gpu)
         model.cuda(gpu)
@@ -158,7 +172,8 @@ def train(gpu, opt, output_dir, noises_init):
     #rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 0.1)
     rf_criterion = "mse"
     
-    data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
+    #data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
+    data_shape = (latent_dim,) #(B, latent_dim=512)
     rectified_flow = RectifiedFlow(
         data_shape=data_shape,
         interp=opt.interp,
@@ -185,13 +200,14 @@ def train(gpu, opt, output_dir, noises_init):
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         x, mask, int_energy, y, gap_pid, idx = data
-                        
+                        x = x.transpose(1,2)
                     if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
                         x = x.cuda(gpu,  non_blocking=True)
                         mask = mask.cuda(gpu,  non_blocking=True)
                         y = y.cuda(gpu,  non_blocking=True)
                         gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
                         int_energy = int_energy.cuda(gpu,  non_blocking=True)
+                        pcvae = pcvae.cuda(gpu)
                         #noises_batch = noises_batch.cuda(gpu)
                     elif opt.distribution_type == 'single':
                         x = x.cuda()
@@ -199,28 +215,25 @@ def train(gpu, opt, output_dir, noises_init):
                         y = y.cuda()
                         gap_pid = gap_pid.cuda()
                         int_energy = int_energy.cuda()
+                        pcvae = pcvae.cuda()
                         #noises_batch = noises_batch.cuda()
                     # Get Latent z1 from VAE (Real Data)
                     with torch.no_grad():
                         z1, _ = pcvae.encode(x, mask, int_energy) # [B, 512]
-                    
-                    
+    
                     rectified_flow.device = x.device      
-                    
-                    x_0 = rectified_flow.sample_source_distribution(x.shape[0])
-                    if opt.model_name == "pvcnn2":
-                        x_0 = x_0.transpose(1,2)
-                    t = rectified_flow.sample_train_time(x.shape[0])
+                    z_0 = rectified_flow.sample_source_distribution(z1.shape[0])
+                    t = rectified_flow.sample_train_time(z1.shape[0])
                     t= t.squeeze()
-                    #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
+                    #TODO reenable conditionals
                     loss = rectified_flow.get_loss(
-                                x_0=x_0,
-                                x_1=x,
-                                y= y,
-                                gap= gap_pid,
-                                energy=int_energy,
+                                x_0=z_0,
+                                x_1=z1,
+                                #y= y,
+                                #gap= gap_pid,
+                                #energy=int_energy,
                                 t=t,
-                                mask = mask,
+                                #mask = mask,
                             )
                     optimizer.zero_grad()
                     loss.backward()
@@ -317,7 +330,7 @@ def train(gpu, opt, output_dir, noises_init):
                         visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x, None,
                                                     None,
                                                     None)
-                        make_phys_plots(x, pts, savepath = outf_syn)
+                        #make_phys_plots(x, pts, savepath = outf_syn)
                     logger.info('Generation: train')
                     model.train()
                     
@@ -346,70 +359,70 @@ def train(gpu, opt, output_dir, noises_init):
     dist.destroy_process_group()
 
 ########## look at this when redoing training ##########
-import torch
-import torch.nn as nn
+# import torch
+# import torch.nn as nn
 
-def train_rectified_flow(vae, dit, dataloader, optimizer, device):
-    """
-    VAE: Frozen pre-trained encoder
-    DiT: The velocity model v(z_t, t)
-    """
-    vae.eval()
-    dit.train()
+# def train_rectified_flow(vae, dit, dataloader, optimizer, device):
+#     """
+#     VAE: Frozen pre-trained encoder
+#     DiT: The velocity model v(z_t, t)
+#     """
+#     vae.eval()
+#     dit.train()
     
-    for pcs, masks in dataloader:
-        pcs, masks = pcs.to(device), masks.to(device)
+#     for pcs, masks in dataloader:
+#         pcs, masks = pcs.to(device), masks.to(device)
         
-        # 1. Get Latent z1 from VAE (Real Data)
-        with torch.no_grad():
-            z1, _ = vae.encode(pcs, masks) # [B, 512]
+#         # 1. Get Latent z1 from VAE (Real Data)
+#         with torch.no_grad():
+#             z1, _ = vae.encode(pcs, masks) # [B, 512]
             
-        # 2. Sample Noise z0
-        z0 = torch.randn_like(z1) # [B, 512]
+#         # 2. Sample Noise z0
+#         z0 = torch.randn_like(z1) # [B, 512]
         
-        # 3. Sample Timestep t uniformly between 0 and 1
-        t = torch.rand((z1.shape[0],), device=device)
-        t_expand = t.view(-1, 1)
+#         # 3. Sample Timestep t uniformly between 0 and 1
+#         t = torch.rand((z1.shape[0],), device=device)
+#         t_expand = t.view(-1, 1)
         
-        # 4. Linear Interpolation (Straight path)
-        # z_t = (1-t)*z0 + t*z1
-        zt = (1 - t_expand) * z0 + t_expand * z1
+#         # 4. Linear Interpolation (Straight path)
+#         # z_t = (1-t)*z0 + t*z1
+#         zt = (1 - t_expand) * z0 + t_expand * z1
         
-        # 5. Predict the Velocity (Direction of the line)
-        # Target is (z1 - z0)
-        target = z1 - z0
-        pred_v = dit(zt, t) # DiT predicts the velocity field
+#         # 5. Predict the Velocity (Direction of the line)
+#         # Target is (z1 - z0)
+#         target = z1 - z0
+#         pred_v = dit(zt, t) # DiT predicts the velocity field
         
-        # 6. Loss: Mean Squared Error on Velocity
-        loss = F.mse_norm(pred_v, target) # Or standard F.mse_loss
+#         # 6. Loss: Mean Squared Error on Velocity
+#         loss = F.mse_norm(pred_v, target) # Or standard F.mse_loss
         
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+#         optimizer.zero_grad()
+#         loss.backward()
+#         optimizer.step()
 
-@torch.no_grad()
-def sample_rectified_flow(vae, dit, steps=50, num_points=2048, device="cuda"):
-    vae.eval()
-    dit.eval()
+# @torch.no_grad()
+# def sample_rectified_flow(vae, dit, steps=50, num_points=2048, device="cuda"):
+#     vae.eval()
+#     dit.eval()
     
-    # 1. Start with Gaussian Noise
-    zt = torch.randn(1, 512).to(device)
-    dt = 1.0 / steps
+#     # 1. Start with Gaussian Noise
+#     zt = torch.randn(1, 512).to(device)
+#     dt = 1.0 / steps
     
-    # 2. Euler Integration (Solving the ODE)
-    for i in range(steps):
-        t = torch.full((1,), i / steps, device=device)
+#     # 2. Euler Integration (Solving the ODE)
+#     for i in range(steps):
+#         t = torch.full((1,), i / steps, device=device)
         
-        # Get velocity at current position and time
-        vt = dit(zt, t)
+#         # Get velocity at current position and time
+#         vt = dit(zt, t)
         
-        # Step forward along the straight line
-        zt = zt + vt * dt
+#         # Step forward along the straight line
+#         zt = zt + vt * dt
         
-    # 3. Final Latent to Point Cloud
-    # zt is now roughly z1 (the data distribution)
-    generated_pc = vae.decoder(zt, num_points=num_points)
-    return generated_pc
+#     # 3. Final Latent to Point Cloud
+#     # zt is now roughly z1 (the data distribution)
+#     generated_pc = vae.decoder(zt, num_points=num_points)
+#     return generated_pc
 #########################################
 
 def mse_norm(pred, target):
@@ -463,11 +476,15 @@ def parse_args():
     parser.add_argument("--gap_classes", type=int, default=0, help=("Number of calorimeter materials used in simulated data"),)
     
     '''model'''
-    parser.add_argument("--model_name", type=str, default="calopodit", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
+    parser.add_argument("--model_name", type=str, default="calladito", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
     parser.add_argument('--beta_start', default=0.0001)
     parser.add_argument('--beta_end', default=0.02)
     parser.add_argument('--schedule_type', default='linear')
     parser.add_argument('--time_num', default=1000)
+
+    parser.add_argument('--model', default='', help="path to model (to continue training)")
+    parser.add_argument('--pcvae_model', default= 'output/train_pcvae/2026-01-10-pcvae-transf-dec/epoch_69.pth', help="path to latent pretrained model")
+
     
     '''Flow'''
     parser.add_argument("--interp", type=str, default="straight", help="Interpolation method for the rectified flow. Choose between ['straight', 'slerp', 'ddim'].")
@@ -494,9 +511,6 @@ def parse_args():
     parser.add_argument('--grad_clip', type=float, default=None, help='weight decay for EBM')
     parser.add_argument('--lr_gamma', type=float, default=0.998, help='lr decay for EBM')
 
-    parser.add_argument('--model', default='', help="path to model (to continue training)")
-
-
     '''distributed'''
     parser.add_argument('--world_size', default=1, type=int,
                         help='Number of distributed nodes.')
@@ -517,7 +531,7 @@ def parse_args():
     '''eval'''
     parser.add_argument('--saveIter', type=int, default=8, help='unit: epoch')
     parser.add_argument('--diagIter', type=int, default=8, help='unit: epoch')
-    parser.add_argument('--vizIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--vizIter', type=int, default=50000, help='unit: epoch')
     parser.add_argument('--print_freq', type=int, default=8, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')

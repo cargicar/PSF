@@ -93,7 +93,7 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
     elif name == 'idl':
         #transform = NormalizePC4D()
         transform = None
-        print(f"warning: using hardcoded E_MIN and E_MAX for energy normalization")
+        #print(f"warning: using hardcoded E_MIN and E_MAX for energy normalization")
         dataset = IDLDataset(dataroot, transform=transform)#, max_seq_length=npoints, ordering='spatial', material_list=["G4_W", "G4_Ta", "G4_Pb"], inference_mode=False)
         train_dataset = dataset
         test_dataset = None

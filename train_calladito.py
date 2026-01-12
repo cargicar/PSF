@@ -56,7 +56,7 @@ def profiler_table_output(prof, output_filename="profiling/cuda_memory_profile.t
 
 
 def train(gpu, opt, output_dir, noises_init):
-    debug = False
+    debug = True
     set_seed(opt)
     logger = setup_logging(output_dir)
     if opt.distribution_type == 'multi':
@@ -199,14 +199,14 @@ def train(gpu, opt, output_dir, noises_init):
                 lr_scheduler.step(epoch)
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
-                        x, mask, int_energy, y, gap_pid, idx = data
+                        x, mask, e_init, y, gap_pid, idx = data
                         x = x.transpose(1,2)
                     if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
                         x = x.cuda(gpu,  non_blocking=True)
                         mask = mask.cuda(gpu,  non_blocking=True)
                         y = y.cuda(gpu,  non_blocking=True)
                         gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
-                        int_energy = int_energy.cuda(gpu,  non_blocking=True)
+                        e_init = e_init.cuda(gpu,  non_blocking=True)
                         pcvae = pcvae.cuda(gpu)
                         #noises_batch = noises_batch.cuda(gpu)
                     elif opt.distribution_type == 'single':
@@ -214,33 +214,34 @@ def train(gpu, opt, output_dir, noises_init):
                         mask = mask.cuda()
                         y = y.cuda()
                         gap_pid = gap_pid.cuda()
-                        int_energy = int_energy.cuda()
+                        e_init = e_init.cuda()
                         pcvae = pcvae.cuda()
                         #noises_batch = noises_batch.cuda()
                     # Get Latent z1 from VAE (Real Data)
                     with torch.no_grad():
-                        z1, _ = pcvae.encode(x, mask, int_energy) # [B, 512]
+                        z1, _ = pcvae.encode(x, mask, e_init) # [B, 512]
     
                     rectified_flow.device = x.device      
                     z_0 = rectified_flow.sample_source_distribution(z1.shape[0])
                     t = rectified_flow.sample_train_time(z1.shape[0])
                     t= t.squeeze()
+                    cfg_mask = (torch.rand(e_init.shape[0], device=x.device) > 0.1).float()
                     #TODO reenable conditionals
                     loss = rectified_flow.get_loss(
                                 x_0=z_0,
                                 x_1=z1,
                                 #y= y,
                                 #gap= gap_pid,
-                                #energy=int_energy,
+                                e_init=e_init,
                                 t=t,
-                                #mask = mask,
+                                mask_condition = cfg_mask,
                             )
                     optimizer.zero_grad()
                     loss.backward()
                     #netpNorm, netgradNorm = getGradNorm(model)
                     #if opt.grad_clip is not None:
                     #    torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
-
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
                     if prof is not None:
                         prof.step()
@@ -251,8 +252,6 @@ def train(gpu, opt, output_dir, noises_init):
                                     .format(
                                 epoch, opt.niter, i, len(dataloader),loss.item()
                                 ))
-
-                
                 
                 if (epoch + 1) % opt.vizIter == 0 and should_diag:
                     logger.info('Generation: eval')
@@ -263,32 +262,36 @@ def train(gpu, opt, output_dir, noises_init):
                     num_samples=opt.bs
                     num_steps = opt.num_steps
                     with torch.no_grad():
-                        if opt.model_name == "pvcnn2":
-                            euler_sampler = MyEulerSamplerPVCNN(
+                        euler_sampler = MyEulerSampler(
                                 rectified_flow=rectified_flow,
                             )
-                        else:
-                            euler_sampler = MyEulerSampler(
-                                    rectified_flow=rectified_flow,
-                                )
-                                
                         # Sample method
                         #FIXME we should be using a validatioon small dataset instead
-                        traj1 = euler_sampler.sample_loop(
+                        #CFG
+                        cfg_scale = 3.0
+                        # traj_cond = euler_sampler.sample_loop(
+                        #     seed=233,
+                        #     #y=y,
+                        #     #gap= gap_pid,
+                        #     e_init=e_init,
+                        #     mask_condition=cfg_mask,
+                        #     num_samples=num_samples,
+                        #     num_steps=num_steps,
+                        #     )
+                        traj_uncond = euler_sampler.sample_loop(
                             seed=233,
-                            y=y,
-                            gap= gap_pid,
-                            energy=int_energy,
-                            mask=mask,
+                            #y=y,
+                            #gap= gap_pid,
+                            e_init=e_init,
+                            mask_condition=torch.zeros(1),
                             num_samples=num_samples,
                             num_steps=num_steps,
                             )
-                        pts= traj1.x_t
-                        trajectory = traj1.trajectories
-                        
-                        #Ehistogram(X,pts, y, gap_pid, energy, title=f"Ehist_calopodit_del")
-                        #plot_batch_3d(pts, y, gaps=gap_pid, energies= energy, title = "Model sampler_G4")
-
+                        pts= traj_uncond.x_t 
+                        #pts= traj_uncond.x_t + cfg_scale * (traj_cond.x_t - traj_uncond.x_t) 
+                        print(f"Latents generated")
+                        recon = pcvae.decoder(pts, e_init, x.shape[2])
+                        print(f"Point clouds reconstructed/decoded")
                         #cf = chamfer_distance(X, pts, squared=True)
                         #print(f"Chamfer Batch AVG Distance calopodit sampler: {cf.item():.6f}")
                 
@@ -318,19 +321,20 @@ def train(gpu, opt, output_dir, noises_init):
                         # x_cpu = x.detach().cpu()
                         # thread = threading.Thread(target=save_plots_async, args=(x_cpu, pts_cpu, outf_syn))
                         # thread.start()
-                        visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                                                trajectory, None, None,
-                                                None)
+                        # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
+                        #                         trajectory, None, None,
+                        #                         None)
 
-                        visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
-                                                pts, None,
-                                                None,
-                                                None)
+                        # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
+                        #                         pts, None,
+                        #                         None,
+                        #                         None)
 
-                        visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x, None,
-                                                    None,
-                                                    None)
-                        #make_phys_plots(x, pts, savepath = outf_syn)
+                        # visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x, None,
+                        #                             None,
+                        #                             None)
+                        make_phys_plots(x, recon, savepath = outf_syn)
+                        print(f"phys metrics plotted and saved to {outf_syn}")
                     logger.info('Generation: train')
                     model.train()
                     
@@ -529,9 +533,9 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', type=int, default=8, help='unit: epoch')
-    parser.add_argument('--diagIter', type=int, default=8, help='unit: epoch')
-    parser.add_argument('--vizIter', type=int, default=50000, help='unit: epoch')
+    parser.add_argument('--saveIter', type=int, default=16, help='unit: epoch')
+    parser.add_argument('--diagIter', type=int, default=16, help='unit: epoch')
+    parser.add_argument('--vizIter', type=int, default=16, help='unit: epoch')
     parser.add_argument('--print_freq', type=int, default=8, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')

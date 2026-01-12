@@ -355,8 +355,12 @@ def make_phys_plots(real, gen, material_list=["G4_W"], savepath="./Phys_plots/")
         "energy": [],
     }
     for i in range(gen.shape[0]):
-        x, y, z, e = real[i].T
-        xg, yg, zg, eg = gen[i].T
+        if real[i].shape[0]==4:
+            x, y, z, e = real[i]
+            xg, yg, zg, eg = gen[i]
+        else:
+            x, y, z, e = real[i].T
+            xg, yg, zg, eg = gen[i].T
 
 
         gen_dict["x"].append(zg)

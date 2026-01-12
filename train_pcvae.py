@@ -388,9 +388,9 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', type=int, default=40, help='unit: epoch')
-    parser.add_argument('--diagIter', type=int, default=16, help='unit: epoch')
-    parser.add_argument('--vizIter', type=int, default=40, help='unit: epoch')
+    parser.add_argument('--saveIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--diagIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--vizIter', type=int, default=8, help='unit: epoch')
     parser.add_argument('--print_freq', type=int, default=32, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')

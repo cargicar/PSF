@@ -5,6 +5,132 @@ from torch.utils.data import Dataset
 import numpy as np
 import torch
 from typing import List, Tuple, Literal
+import pickle
+        
+class LazyIDLDataset(Dataset):
+    def __init__(self, data_dir, transform=None, reflow= False):
+        self.data_dir = data_dir
+        self.transform = transform
+        # The core of lazy loading: a map from global index to (file_path, local_index)
+        self.global_index_map: List[Tuple[str, int]] = []
+        self.reflow = reflow
+        self.files = {}
+        self._create_global_index_map()
+        if self.reflow:
+            reflow_data = torch.load('G4_reflow_DATASET_100.pth', map_location='cpu')
+            self.x0 = reflow_data[0]
+            self.x1 = reflow_data[1]
+
+    def _create_global_index_map(self):
+        base_path = Path(self.data_dir)
+        file_paths = list(base_path.rglob("*.h5")) + list(base_path.rglob("*.hdf5"))
+        cache_path = Path(self.data_dir) / "dataset_cache.pkl"
+        self.max_particles = 1700 #FIXME hardcoded max particles
+        
+        lengths = [] # Temporary list to find the min
+        if cache_path.exists():
+            print(f"Loading dataset index from cache: {cache_path}")
+            with open(cache_path, "rb") as f:
+                self.global_index_map = pickle.load(f)
+            return
+
+        for file_path in file_paths:
+            if "Pb_Simulation" in str(file_path):
+                continue
+            try:
+                with h5py.File(file_path, "r") as f:
+                    for key in f.keys():
+                        group = f[key]
+                        # Read the shape of the dataset without loading the data
+                        #num_particles = group["indices"].shape[0]
+                        self.global_index_map.append((str(file_path), key))
+                        #lengths.append(num_particles)
+            except Exception as e:
+                print(f"Error reading {file_path}: {e}")
+                
+        # Calculate the global minimum points across the entire dataset
+        #self.max_particles = max(lengths) if lengths else 0
+        # Cache the index map for future use
+        with open(cache_path, "wb") as f:
+            pickle.dump(self.global_index_map, f)
+        
+        print(f"Dataset indexed. Total events: {len(self.global_index_map)}")
+        print(f"Max particles found in dataset: {self.max_particles}")
+
+    def __len__(self):
+        """Returns the total number of individual events (showers) in the dataset."""
+        return len(self.global_index_map)
+
+    def __getitem__(self, idx):
+        """Retrieves a single data sample by loading the necessary file on demand."""
+        
+        file_path, group_key = self.global_index_map[idx]
+        
+        if self.reflow:
+            # Fix: Use the actual idx provided by the DataLoader
+            sample_idx = idx % self.x0.shape[0]
+            return (self.x0[sample_idx], self.x1[sample_idx], 0.0, 0.0, idx)
+        # if self.reflow:
+        #     #idx = random.randint(0, 1001) #FIXME num samples 1001 hardcoded
+        #     x0 = self.x0[idx % len(self.x0)]
+        #     x0 = self.x0[idx, :, :]
+        #     x1 = self.x1[idx, :, :]
+        #     self.pkl = False
+        #     self.npy = False
+        #     return (x0, x1, 0.0, 0.0, idx)
+        else:                
+            #Load the entire file (the I/O-heavy step, done only when needed)
+            # LAZY OPENING: Check if this file is already open in this worker
+            #Because we are keeping file handles open in self.files, they will stay open until the DataLoader workers are destroyed at the end of the epoch. This is usually fine, but if you have thousands of separate HDF5 files, you might hit the OS "Maximum Open Files" limit.
+            if file_path not in self.files:
+                # 'swmr=True' allows multiple workers to read the same file safely
+                self.files[file_path] = h5py.File(file_path, "r", libver='latest', swmr=True)
+            
+            f = self.files[file_path]
+            
+            try:
+                group = f[group_key]
+                # Use [:] for faster slicing than [()]
+                indices = group["indices"][:]
+                values = group["values"][:]
+                
+                # Efficiently stack instead of concatenate + newaxis
+                shower = np.column_stack((indices, values))
+                
+                initial_energy = group.attrs.get("initial_energy", 0.0)
+                
+                if self.transform:
+                    shower = self.transform(shower)
+
+                return (
+                    torch.from_numpy(shower).float(),
+                    torch.tensor(initial_energy).float(),
+                    torch.tensor(0).long(), # material_index
+                    torch.tensor(0).long(), # gap_pid
+                    idx
+                )
+            except Exception as e:
+                print(f"Error accessing {group_key} in {file_path}: {e}")
+                # Return a dummy sample or re-raise
+                raise e
+            
+#load latents from pcvae model
+class LatentDataset(torch.utils.data.Dataset):
+    def __init__(self, latent_file):
+        data = torch.load(latent_file)
+        self.mu = data['mu']
+        self.logvar = data['logvar']
+
+    def __len__(self):
+        return len(self.mu)
+
+    def __getitem__(self, idx):
+        # Sample from the distribution (Reparameterization trick)
+        mu = self.mu[idx]
+        std = torch.exp(0.5 * self.logvar[idx])
+        z = mu + std * torch.randn_like(std)
+        return z
+    
 
 class ECAL_Chunked_Dataset(Dataset):
     def __init__(self, file_path: str,
@@ -147,134 +273,3 @@ class ECAL_Chunked_Dataset(Dataset):
 
         else:
             return pos, ene, initial_energy, material_index, initial_energy_t
-        
-
-class LazyIDLDataset(Dataset):
-
-    def __init__(self, data_dir, transform=None, reflow= False):
-        self.data_dir = data_dir
-        self.transform = transform
-        # The core of lazy loading: a map from global index to (file_path, local_index)
-        self.global_index_map: List[Tuple[str, int]] = []
-        self.reflow = reflow
-        self._create_global_index_map()
-        if self.reflow:
-            reflow_data = torch.load('G4_reflow_DATASET_100.pth', map_location='cpu')
-            self.x0 = reflow_data[0]
-            self.x1 = reflow_data[1]
-
-    # def _create_global_index_map(self):
-    #     base_path = Path(self.data_dir)
-    #     # This finds all .h5/.hdf5 files in all subdirectories
-    #     file_paths = list(base_path.rglob("*.h5")) + list(base_path.rglob("*.hdf5"))
-    #     for file_path in file_paths:
-    #         # NOTE we will save the Pb dataset to test transferability
-    #         if "Pb_Simulation" in str(file_path):
-    #             continue
-    #         try:
-    #             with h5py.File(file_path, "r") as f:
-    #                 # The parent folder name acts as the category label
-    #                 #category = file_path.parent.name 
-    #                 for key in f.keys():
-    #                     self.global_index_map.append((str(file_path), key))
-    #         except Exception as e:
-    #             print(f"Error reading {file_path}: {e}")    
-    #     print(f"Dataset indexed. Total events found: {len(self.global_index_map)}")    
-
-    def _create_global_index_map(self):
-        base_path = Path(self.data_dir)
-        file_paths = list(base_path.rglob("*.h5")) + list(base_path.rglob("*.hdf5"))
-        
-        lengths = [] # Temporary list to find the min
-        
-        for file_path in file_paths:
-            if "Pb_Simulation" in str(file_path):
-                continue
-            try:
-                with h5py.File(file_path, "r") as f:
-                    for key in f.keys():
-                        group = f[key]
-                        # Read the shape of the dataset without loading the data
-                        num_particles = group["indices"].shape[0]
-                        self.global_index_map.append((str(file_path), key))
-                        lengths.append(num_particles)
-            except Exception as e:
-                print(f"Error reading {file_path}: {e}")
-                
-        # Calculate the global minimum points across the entire dataset
-        self.max_particles = max(lengths) if lengths else 0
-        
-        print(f"Dataset indexed. Total events: {len(self.global_index_map)}")
-        print(f"Max particles found in dataset: {self.max_particles}")
-
-    def __len__(self):
-        """Returns the total number of individual events (showers) in the dataset."""
-        return len(self.global_index_map)
-
-    def __getitem__(self, idx):
-        """Retrieves a single data sample by loading the necessary file on demand."""
-        
-        # if torch.is_tensor(idx):
-        #     idx = idx.tolist()
-            
-        # 1. Look up the file path and local index for the requested global index
-        #file_path, local_idx = self.global_index_map[idx]
-        file_path, group_key = self.global_index_map[idx]
-
-        if self.reflow:
-            idx = random.randint(0, 1001) #FIXME num samples 1001 hardcoded
-            x0 = self.x0[idx, :, :]
-            x1 = self.x1[idx, :, :]
-            self.pkl = False
-            self.npy = False
-            return (x0, x1, 0.0, 0.0, idx)
-        else:                
-            #Load the entire file (the I/O-heavy step, done only when needed)
-            with h5py.File(file_path, "r") as f:
-                group = f[group_key]
-                indices = group["indices"][()]
-                values = group["values"][()]
-                shower = np.concatenate((indices, values[:, np.newaxis]), axis=1)
-                initial_energy = group.attrs["initial_energy"].item()
-                material = group['material'][()].decode('utf-8')
-#                    material_index = self.material_list.index(material)
-                material_index = 0 #FIXME Temporary
-                gap_pid = 0 #FIXME Temporary
-                #initial_energy = ((initial_energy - 10.) / 45.) - 1.0 # Scale to roughly -1 to 1
-                #all_showers.append(shower)
-        
-                
-                # Since pid/gap_pid were replicated in the original dataset, 
-                # we assume the single scalar value applies to all showers in the file.
-                
-        
-                if self.transform:
-                    shower = self.transform(shower)
-                    
-
-                # The showers data has shape (N_particles, 4)
-                shower = torch.from_numpy(shower).float()
-                # The energy, pid, and gap_pid are scalars
-                initial_energy = torch.tensor(initial_energy).float()
-                pid = torch.tensor(material_index).long()
-                gap_pid = torch.tensor(gap_pid).long()
-                #gap_pid = torch.tensor(gap_pid).long()
-            # Return the tensors
-            return (shower, initial_energy, pid, gap_pid, idx)
-        
-#load latents from pcvae model
-class LatentDataset(torch.utils.data.Dataset):
-    def __init__(self, latent_file):
-        data = torch.load(latent_file)
-        self.mu = data['mu']
-        self.logvar = data['logvar']
-
-    def __len__(self):
-        return len(self.mu)
-
-    def __getitem__(self, idx):
-        # Sample from the distribution (Reparameterization trick)
-        mu = self.mu[idx]
-        std = torch.exp(0.5 * self.logvar[idx])
-        z = mu + std * torch.randn_like(std)
-        return z

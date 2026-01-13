@@ -55,8 +55,8 @@ def profiler_table_output(prof, output_filename="profiling/cuda_memory_profile.t
     print(f"Profiler table saved to {output_filename}")
 
 
-def train(gpu, opt, output_dir, noises_init):
-    debug = True
+def test(gpu, opt, output_dir, noises_init):
+    debug = False
     set_seed(opt)
     logger = setup_logging(output_dir)
     if opt.distribution_type == 'multi':
@@ -151,19 +151,10 @@ def train(gpu, opt, output_dir, noises_init):
     if should_diag:
         logger.info(opt)
 
-    optimizer= optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
-
-    lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
-
     if opt.model != '':
         ckpt = torch.load(opt.model)
         model.load_state_dict(ckpt['model_state'])
         #optimizer.load_state_dict(ckpt['optimizer_state'])
-
-    if opt.model != '':
-        start_epoch = torch.load(opt.model)['epoch'] + 1
-    else:
-        start_epoch = 0
 
     # def new_x_chain(x, num_chain):
     #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
@@ -187,222 +178,107 @@ def train(gpu, opt, output_dir, noises_init):
         dtype=torch.float32,
     )
     ##################################################################################
-    ''' training '''
+    ''' sample generation '''
     ##################################################################################
     profiling = opt.enable_profiling
     out_prof = None
+    xs = []
+    recons =[]
     with profile(profiling, output_dir=out_prof) as prof:
         with torch.profiler.record_function("train_trace"):   
-            for epoch in range(start_epoch, opt.niter):
-                if opt.distribution_type == 'multi':
-                    train_sampler.set_epoch(epoch)
-                lr_scheduler.step(epoch)
-                for i, data in enumerate(dataloader):
-                    if opt.dataname == 'g4' or opt.dataname == 'idl':
-                        x, mask, e_init, y, gap_pid, idx = data
-                        x = x.transpose(1,2)
-                    if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
-                        x = x.cuda(gpu,  non_blocking=True)
-                        mask = mask.cuda(gpu,  non_blocking=True)
-                        y = y.cuda(gpu,  non_blocking=True)
-                        gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
-                        e_init = e_init.cuda(gpu,  non_blocking=True)
-                        pcvae = pcvae.cuda(gpu)
-                        #noises_batch = noises_batch.cuda(gpu)
-                    elif opt.distribution_type == 'single':
-                        x = x.cuda()
-                        mask = mask.cuda()
-                        y = y.cuda()
-                        gap_pid = gap_pid.cuda()
-                        e_init = e_init.cuda()
-                        pcvae = pcvae.cuda()
-                        #noises_batch = noises_batch.cuda()
-                    # Get Latent z1 from VAE (Real Data)
-                    with torch.no_grad():
-                        z1, _ = pcvae.encode(x, mask, e_init) # [B, 512]
-    
-                    rectified_flow.device = x.device      
-                    z_0 = rectified_flow.sample_source_distribution(z1.shape[0])
-                    t = rectified_flow.sample_train_time(z1.shape[0])
-                    t= t.squeeze()
-                    cfg_mask = (torch.rand(e_init.shape[0], device=x.device) > 0.1).float()
-                    #TODO reenable conditionals
-                    loss = rectified_flow.get_loss(
-                                x_0=z_0,
-                                x_1=z1,
-                                #y= y,
-                                #gap= gap_pid,
-                                e_init=e_init,
-                                t=t,
-                                mask_condition = cfg_mask,
-                            )
-                    optimizer.zero_grad()
-                    loss.backward()
-                    #netpNorm, netgradNorm = getGradNorm(model)
-                    #if opt.grad_clip is not None:
-                    #    torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
-                    if prof is not None:
-                        prof.step()
-
-                    if i % opt.print_freq == 0 and should_diag:
-
-                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    '
-                                    .format(
-                                epoch, opt.niter, i, len(dataloader),loss.item()
-                                ))
+            for i, data in enumerate(dataloader):
+                if i > 21:
+                    break
+                if opt.dataname == 'g4' or opt.dataname == 'idl':
+                    x, mask, e_init, y, gap_pid, idx = data
+                    x = x.transpose(1,2)
+                if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
+                    x = x.cuda(gpu,  non_blocking=True)
+                    mask = mask.cuda(gpu,  non_blocking=True)
+                    y = y.cuda(gpu,  non_blocking=True)
+                    gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
+                    e_init = e_init.cuda(gpu,  non_blocking=True)
+                    pcvae = pcvae.cuda(gpu)
+                    #noises_batch = noises_batch.cuda(gpu)
+                elif opt.distribution_type == 'single':
+                    x = x.cuda()
+                    mask = mask.cuda()
+                    y = y.cuda()
+                    gap_pid = gap_pid.cuda()
+                    e_init = e_init.cuda()
+                    pcvae = pcvae.cuda()
+                    #noises_batch = noises_batch.cuda()
                 
-                if (epoch + 1) % opt.vizIter == 0 and should_diag:
-                    logger.info('Generation: eval')
-
-                    model.eval()
-                    #x = x
-                    #TODO CFG has to be done here
-                    num_samples=opt.bs
-                    num_steps = opt.num_steps
-                    with torch.no_grad():
-                        euler_sampler = MyEulerSampler(
-                                rectified_flow=rectified_flow,
-                            )
-                        # Sample method
-                        #FIXME we should be using a validatioon small dataset instead
-                        #CFG
-                        cfg_scale = 4.0
-                        traj_cond = euler_sampler.sample_loop(
-                            seed=233,
-                            #y=y,
-                            #gap= gap_pid,
-                            e_init=e_init,
-                            mask_condition=cfg_mask,
-                            num_samples=num_samples,
-                            num_steps=num_steps,
-                            )
-                        traj_uncond = euler_sampler.sample_loop(
-                            seed=233,
-                            #y=y,
-                            #gap= gap_pid,
-                            e_init=e_init,
-                            mask_condition=torch.zeros(1),
-                            num_samples=num_samples,
-                            num_steps=num_steps,
-                            )
-                        #pts= traj_uncond.x_t 
-                        pts= traj_uncond.x_t + cfg_scale * (traj_cond.x_t - traj_uncond.x_t) 
-                        print(f"Latents generated")
-                        recon = pcvae.decoder(pts, e_init, x.shape[2])
-                        print(f"Point clouds reconstructed/decoded")
-                        #cf = chamfer_distance(X, pts, squared=True)
-                        #print(f"Chamfer Batch AVG Distance calopodit sampler: {cf.item():.6f}")
+                rectified_flow.device = x.device      
                 
-
-                        # x_gen_eval = model.gen_samples(new_x_chain(x, 25).shape, x.device, clip_denoised=False)
-                        # x_gen_list = model.gen_sample_traj(new_x_chain(x, 1).shape, x.device, freq=40, clip_denoised=False)
-                        # x_gen_all = torch.cat(x_gen_list, dim=0)
-
-                        # gen_stats = [x_gen_eval.mean(), x_gen_eval.std()]
-                        # gen_eval_range = [x_gen_eval.min().item(), x_gen_eval.max().item()]
-
-                        # logger.info('      [{:>3d}/{:>3d}]  '
-                        #              'eval_gen_range: [{:>10.4f}, {:>10.4f}]     '
-                        #              'eval_gen_stats: [mean={:>10.4f}, std={:>10.4f}]      '
-                        #     .format(
-                        #     epoch, opt.niter,
-                        #     *gen_eval_range, *gen_stats,
-                            # ))
-                    if debug:
-                        ######### Offload Plotting to a CPU Thread ######
-                        # import threading
-                        # def save_plots_async(x, pts, path):
-                        #     make_phys_plots(x, pts, savepath=path)
-
-                        # # Inside the diag block:
-                        # pts_cpu = pts.detach().cpu()
-                        # x_cpu = x.detach().cpu()
-                        # thread = threading.Thread(target=save_plots_async, args=(x_cpu, pts_cpu, outf_syn))
-                        # thread.start()
-                        # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                        #                         trajectory, None, None,
-                        #                         None)
-
-                        # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
-                        #                         pts, None,
-                        #                         None,
-                        #                         None)
-
-                        # visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x, None,
-                        #                             None,
-                        #                             None)
-                        make_phys_plots(x, recon, savepath = outf_syn)
-                        print(f"phys metrics plotted and saved to {outf_syn}")
-                    logger.info('Generation: train')
-                    model.train()
-                    
-                if (epoch + 1) % opt.saveIter == 0:
-
-                    if should_diag:
-
-                        save_dict = {
-                            'epoch': epoch,
-                            'model_state': model.state_dict(),
-                            'optimizer_state': optimizer.state_dict()
-                        }
-
-                        torch.save(save_dict, '%s/epoch_%d.pth' % (output_dir, epoch))
-
-
-                    if opt.distribution_type == 'multi':
-                        dist.barrier()
-                        map_location = {'cuda:%d' % 0: 'cuda:%d' % gpu}
-                        model.load_state_dict(
-                            torch.load('%s/epoch_%d.pth' % (output_dir, epoch), map_location=map_location)['model_state'])
-    if gpu==0:
-        prof.export_memory_timeline(f"{out_prof}/memory_timeline.raw.json.gz", device=f"cuda:{gpu}")
-        prof.export_memory_timeline(f"{out_prof}/memory_timeline.html", device=f"cuda:{gpu}")
-    profiler_table_output(prof, output_filename=f"{out_prof}/cuda_memory_profile_rank{opt.rank}.txt")
-    dist.destroy_process_group()
-
-########## look at this when redoing training ##########
-# import torch
-# import torch.nn as nn
-
-# def train_rectified_flow(vae, dit, dataloader, optimizer, device):
-#     """
-#     VAE: Frozen pre-trained encoder
-#     DiT: The velocity model v(z_t, t)
-#     """
-#     vae.eval()
-#     dit.train()
-    
-#     for pcs, masks in dataloader:
-#         pcs, masks = pcs.to(device), masks.to(device)
-        
-#         # 1. Get Latent z1 from VAE (Real Data)
-#         with torch.no_grad():
-#             z1, _ = vae.encode(pcs, masks) # [B, 512]
+                if prof is not None:
+                    prof.step()
             
-#         # 2. Sample Noise z0
-#         z0 = torch.randn_like(z1) # [B, 512]
-        
-#         # 3. Sample Timestep t uniformly between 0 and 1
-#         t = torch.rand((z1.shape[0],), device=device)
-#         t_expand = t.view(-1, 1)
-        
-#         # 4. Linear Interpolation (Straight path)
-#         # z_t = (1-t)*z0 + t*z1
-#         zt = (1 - t_expand) * z0 + t_expand * z1
-        
-#         # 5. Predict the Velocity (Direction of the line)
-#         # Target is (z1 - z0)
-#         target = z1 - z0
-#         pred_v = dit(zt, t) # DiT predicts the velocity field
-        
-#         # 6. Loss: Mean Squared Error on Velocity
-#         loss = F.mse_norm(pred_v, target) # Or standard F.mse_loss
-        
-#         optimizer.zero_grad()
-#         loss.backward()
-#         optimizer.step()
+                logger.info('Generation: eval')
+
+                model.eval()
+                #x = x
+                #TODO CFG has to be done here
+                num_samples=opt.bs
+                num_steps = opt.num_steps
+                with torch.no_grad():
+                    euler_sampler = MyEulerSampler(
+                            rectified_flow=rectified_flow,
+                        )
+                    # Sample method
+                    #FIXME we should be using a validatioon small dataset instead
+                    #Sampling with RF API
+                    #CFG
+                    cfg_mask = (torch.rand(e_init.shape[0], device=x.device) > 0.1).float()
+                    cfg_scale = 7.0
+                    traj_cond = euler_sampler.sample_loop(
+                        seed=233,
+                        #y=y,
+                        #gap= gap_pid,
+                        e_init=e_init,
+                        mask_condition=cfg_mask,
+                        num_samples=num_samples,
+                        num_steps=num_steps,
+                        )
+                    traj_uncond = euler_sampler.sample_loop(
+                        seed=233,
+                        #y=y,
+                        #gap= gap_pid,
+                        e_init=e_init,
+                        mask_condition=torch.zeros(1),
+                        num_samples=num_samples,
+                        num_steps=num_steps,
+                        )
+                    #pts= traj_uncond.x_t 
+                    pts= traj_uncond.x_t + cfg_scale * (traj_cond.x_t - traj_uncond.x_t) 
+                    recon = pcvae.decoder(pts, e_init, x.shape[2])
+                    xs.append(x)
+                    recons.append(recon)
+                    print(f"Latents generated")
+
+                    print(f"Point clouds reconstructed batch {i}")
+                    
+                if debug:
+                    
+                    # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
+                    #                         trajectory, None, None,
+                    #                         None)
+
+                    # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
+                    #                         pts, None,
+                    #                         None,
+                    #                         None)
+
+                    # visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x, None,
+                    #                             None,
+                    #                             None)
+                    outf_syn = f"output/test_calladito/"
+                    make_phys_plots(x, recon, savepath = outf_syn)
+                    print(f"phys metrics plotted and saved to {outf_syn}")    
+            xs = torch.cat(xs, 0)
+            recons = torch.cat(recons, 0)
+            torch.save([xs, recons], f'{opt.pthsave}_calladito_gen_Jan_13.pth')               
+    dist.destroy_process_group()
 
 # @torch.no_grad()
 # def sample_rectified_flow(vae, dit, steps=50, num_points=2048, device="cuda"):
@@ -454,9 +330,9 @@ def main():
     if opt.distribution_type == 'multi':
         opt.ngpus_per_node = torch.cuda.device_count()
         opt.world_size = opt.ngpus_per_node * opt.world_size
-        mp.spawn(train, nprocs=opt.ngpus_per_node, args=(opt, output_dir, noises_init))
+        mp.spawn(test, nprocs=opt.ngpus_per_node, args=(opt, output_dir, noises_init))
     else:
-        train(opt.gpu, opt, output_dir, noises_init)
+        test(opt.gpu, opt, output_dir, noises_init)
 
 
 
@@ -468,6 +344,7 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
     parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/')
+    parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')

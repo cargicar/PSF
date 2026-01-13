@@ -59,7 +59,7 @@ def extract_pcvae_latents_and_reconstruction(args, device="cuda:0"):
     indices = list(range(subset_size)) # First 1000
     #indices = np.random.choice(len(dataset), subset_size, replace=False) # Random 
     train_subset = Subset(dataset, indices)        
-    val_loader = DataLoader(train_subset, batch_size=args.bs, pin_memory = True,
+    val_loader = DataLoader(dataset, batch_size=args.bs, pin_memory = True,
                                 num_workers=args.workers, drop_last=True, 
                                 collate_fn=partial(pad_collate_fn, max_particles=dataset.max_particles) )
 
@@ -67,18 +67,30 @@ def extract_pcvae_latents_and_reconstruction(args, device="cuda:0"):
     all_logvars = []
     #loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4)
     #model.eval()
+    xs = []
+    recons = []
     with torch.no_grad():
         for i, data in enumerate(val_loader):
+            if i > 21:
+                break
             x, mask, init_energy, y, gap_pid, idx = data
             x = x.transpose(1,2)
             x, mask, init_energy= x.to(device), mask.to(device), init_energy.to(device)
             pcs_recon, mu, logvar = model(x, mask, init_energy)
+            xs.append(x)
+            recons.append(pcs_recon)
+            print(f"Decode batch {i}")
             # collect lantents
             all_mus.append(mu.cpu())
             all_logvars.append(logvar.cpu())
+        xs = torch.cat(xs, 0)
+        recons = torch.cat(recons, 0)
+        torch.save([xs, recons], f'{args.pthsave}_pcvae_gen_Jan_13.pth')  
+        print(f"Plot save to {args.pthsave}")
         #plot one example
-        plot_4d_reconstruction(x, pcs_recon, saveplot, index=0)
-        print(f"Plot save to {saveplot}")
+        #plot_4d_reconstruction(x, pcs_recon, saveplot, index=0)
+        
+        #print(f"Plot save to {saveplot}")
     # Concatenate all batches
     all_mus = torch.cat(all_mus, dim=0)
     all_logvars = torch.cat(all_logvars, dim=0)
@@ -109,6 +121,7 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
     parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/')
+    parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')

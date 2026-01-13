@@ -1,3 +1,4 @@
+# From omni_jet_alpha_c
 import json
 import math
 import h5py
@@ -1910,13 +1911,13 @@ def read_generated(file_path, material_list=["G4_Ta","G4_W",],num_showers=-1,mat
                 print(f"Shower #: {i}/{num_showers}, Material: {mat}")
 
 
-            gen_dict["x"].append(zg)
-            gen_dict["z"].append(xg)
+            gen_dict["z"].append(zg)
+            gen_dict["x"].append(xg)
             gen_dict["y"].append(yg)
             gen_dict["energy"].append(eg)
 
-            data_dict["x"].append(z)
-            data_dict["z"].append(x)
+            data_dict["z"].append(z)
+            data_dict["x"].append(x)
             data_dict["y"].append(y)
             data_dict["energy"].append(energy)
             # data_dict_truth["z"].append(xt)
@@ -1928,6 +1929,59 @@ def read_generated(file_path, material_list=["G4_Ta","G4_W",],num_showers=-1,mat
         ak_array = ak.Array(gen_dict)
         return ak_array, ak_array_truth
 
+
+def read_generated_pth(file_path, material_list=["G4_Ta","G4_W",],num_showers=-1,material="G4_W"):
+
+    x_tensor, gen_tensor = torch.load(file_path)
+    gen_dict = {
+        "x": [],
+        "y": [],
+        "z": [],
+        "energy": []
+    }
+    
+    data_dict = {
+        "x": [],
+        "y": [],
+        "z": [],
+        "energy": [],
+    }
+    
+    if num_showers == -1:
+        num_showers = x_tensor.shape[0]
+    #FIXME temporal 
+    #num_showers = gen_tensor.shape[0]
+    for i in range(num_showers):
+        breakpoint()
+        x, y, z, e = x_tensor[i]
+        xg, yg, zg, eg = gen_tensor[i]
+        # eg_min = eg.min()
+        #eg_max = eg.max()
+        #eg = (eg - eg_min) / (eg_max - eg_min)   # Rescale to initial energy
+        #xt,yt,zt,Et = decode_hits(spatial_truth,energy_truth)
+        
+        if i % 5000 == 0 or i == num_showers:
+            print(f"Shower #: {i}/{num_showers}, Material: {material}")
+
+
+        gen_dict["x"].append(zg)
+        gen_dict["z"].append(xg)
+        gen_dict["y"].append(yg)
+        gen_dict["energy"].append(eg)
+
+        data_dict["x"].append(z)
+        data_dict["z"].append(x)
+        data_dict["y"].append(y)
+        data_dict["energy"].append(e)
+        # data_dict_truth["z"].append(xt)
+        # data_dict_truth["x"].append(yt)
+        # data_dict_truth["y"].append(zt)
+        # data_dict_truth["energy"].append(Et)
+    
+    ak_array_truth = ak.Array(data_dict)
+    ak_array = ak.Array(gen_dict)
+    return ak_array, ak_array_truth
+
 def make_plots(file_paths: list[str], #list containig file paths for simulation and generated data
                 material_list=["G4_W"],
                 num_showers=-1):
@@ -1937,7 +1991,10 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
     #filename = file_path.split("/")[-1][:-3]
 
     for material in material_list:
-        generated_features, ground_truth_features = read_generated(file_paths, material_list, num_showers, material)
+        if isinstance(file_paths, list):
+            generated_features, ground_truth_features = read_generated(file_paths, material_list, num_showers, material)
+        else:
+            generated_features, ground_truth_features = read_generated_pth(file_paths, material_list, num_showers, material)
         fig = plot_paper_plots(
             [ground_truth_features, generated_features],
             labels=["Ground Truth", "Generated"],
@@ -1956,5 +2013,8 @@ if __name__ == "__main__":
     parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-06_clopodit_idl_mask/syn/combined_photon_samples.pth')
     parser.add_argument("--num_showers", type=int, default=2560, help="Number of showers to process (-1 for all)")
     args = parser.parse_args()
-    filepaths = [args.dataroot, args.genroot]
+    if 'pth' in args.dataroot:
+        filepaths = args.dataroot
+    else:
+        filepaths = [args.dataroot, args.genroot]
     make_plots(filepaths, num_showers=args.num_showers)

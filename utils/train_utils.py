@@ -198,6 +198,58 @@ class MyEulerSampler(Sampler):
             mask = model_kwargs["mask"].unsqueeze(-1).to(self.x_t.device)
             self.x_t = self.x_t * mask
 
+
+class DDIMSampler:
+    def __init__(self, model, n_steps=1000, ddim_discretize="uniform", ddim_eta=0.0):
+        self.model = model  # Your AdaLN DiT
+        self.n_steps = n_steps # Total training steps (usually 1000)
+        self.eta = ddim_eta # 0.0 for deterministic DDIM
+        
+        # Define the beta schedule (should match your training)
+        betas = torch.linspace(0.0001, 0.02, n_steps)
+        alphas = 1.0 - betas
+        self.alphas_cumprod = torch.cumprod(alphas, dim=0)
+        self.alphas_cumprod_prev = torch.cat([torch.tensor([1.0]), self.alphas_cumprod[:-1]])
+
+    def get_sampling_timesteps(self, n_sample_steps):
+        """Creates the subset of timesteps to jump through."""
+        times = np.linspace(0, self.n_steps - 1, n_sample_steps, dtype=int)
+        return list(reversed(times))
+
+    @torch.no_grad()
+    def sample(self, shape, e_init, n_sample_steps=50, cfg_scale=3.0):
+        device = next(self.model.parameters()).device
+        z = torch.randn(shape, device=device)
+        timesteps = self.get_sampling_timesteps(n_sample_steps)
+        
+        # Pre-calculate alpha values for the subset
+        for i, step in enumerate(timesteps):
+            t = torch.full((shape[0],), step, device=device, dtype=torch.long)
+            prev_step = timesteps[i + 1] if i + 1 < len(timesteps) else 0
+            
+            # 1. Get CFG Noise Prediction
+            # Conditioned
+            eps_cond = self.model(z, t, e_init, mask_condition=torch.ones(1, device=device))
+            # Unconditioned
+            eps_uncond = self.model(z, t, e_init, mask_condition=torch.zeros(1, device=device))
+            # Final Guided Noise
+            eps = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
+            
+            # 2. DDIM Math
+            alpha_t = self.alphas_cumprod[step]
+            alpha_prev = self.alphas_cumprod[prev_step]
+            
+            # Predict z_0
+            pred_z0 = (z - torch.sqrt(1 - alpha_t) * eps) / torch.sqrt(alpha_t)
+            
+            # Direction pointing to z_t
+            dir_zt = torch.sqrt(1 - alpha_prev) * eps
+            
+            # Update z
+            z = torch.sqrt(alpha_prev) * pred_z0 + dir_zt
+            
+        return z
+
 class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
     def __init__(self, loss_type: str = "mse", energy_weight: float = 0.1):
         super().__init__(loss_type=loss_type)
@@ -282,6 +334,39 @@ def masked_chamfer_4d(pc_pred, pc_gt, mask):
     loss_backward = (min_dist_from_gt * mask).sum(dim=1) / mask.sum(dim=1)
     
     return (loss_forward + loss_backward).mean()
+
+def vae_loss_function(x, recon_x, mu, logvar, e_init, mask):
+    """
+    recon_x: [B, 5, N] (x, y, z, E, hit_prob)
+    x: [B, 4, N] (target x, y, z, E)
+    mask: [B, N] (1 for real hits, 0 for padding)
+    """
+    pred_hit_prob = recon_x[:, 4, :] # [B, N]
+    # This forces hit_prob to 0 where the ground truth is padding
+    loss_hit = F.binary_cross_entropy(pred_hit_prob, mask.float())
+    
+    # Split coordinates and energy
+    pred_xyz = recon_x[:, :3, :]
+    target_xyz = x[:, :3, :]
+    pred_e = recon_x[:, 3, :]
+    target_e = x[:, 3, :]
+    m = mask.unsqueeze(1) # [B, 1, N]
+    # 1. Coordinate Loss: MSE + Chamfer for Volumetric Shape
+    # Chamfer helps fix the "stringy" geometry by encouraging clusters
+    loss_xyz = F.mse_loss(pred_xyz * m, target_xyz * m)
+    loss_chamfer = masked_chamfer_4d(pred_xyz, target_xyz, mask)
+
+    # 2. Energy Distribution Loss
+    # Since sum(pred_e) == e_init, we treat this as a distribution problem.
+    # Kullback-Leibler Divergence or simply MSE on the normalized energies.
+    loss_energy = F.mse_loss(pred_e * m, target_e * m)
+
+    # 3. KLD Loss (Standard VAE)
+    kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+    # Total loss with weighting (adjust these based on training behavior)
+    #TODO here scales for each loss has been hard coded. Pass it from somewhere else
+    return loss_xyz + 0.5 * loss_chamfer + 10.0 * loss_energy + 0.01 * kld_loss+ 2.0 * loss_hit
 
 def masked_chamfer_distance(pc_a, pc_b, mask_a, mask_b):
     """

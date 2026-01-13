@@ -238,15 +238,10 @@ def train(gpu, opt, output_dir, noises_init):
                         init_energy = init_energy.cuda()
                         #noises_batch = noises_batch.cuda()
                     pcs_recon, mu, logvar = model(x, mask, init_energy)
-                    
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
                     #loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
-                    loss = masked_chamfer_4d(x, pcs_recon, mask)
-                    #  KL Divergence Loss
-                    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
+                    loss = vae_loss_function(x, pcs_recon, mu, logvar, init_energy, mask)
                     
-                    # Total Loss
-                    loss = loss + beta * kl_loss
                     
                     optimizer.zero_grad()
                     loss.backward()
@@ -345,7 +340,7 @@ def parse_args():
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=256, help='input batch size')
+    parser.add_argument('--bs', type=int, default=350, help='input batch size')
     parser.add_argument('--workers', type=int, default=32, help='workers')
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)

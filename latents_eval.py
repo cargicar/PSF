@@ -67,40 +67,45 @@ def extract_pcvae_latents_and_reconstruction(args, device="cuda:0"):
     all_logvars = []
     #loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4)
     #model.eval()
+    masks =[]
     xs = []
     recons = []
     with torch.no_grad():
         for i, data in enumerate(val_loader):
             if i > 21:
                 break
+            
             x, mask, init_energy, y, gap_pid, idx = data
             x = x.transpose(1,2)
             x, mask, init_energy= x.to(device), mask.to(device), init_energy.to(device)
             pcs_recon, mu, logvar = model(x, mask, init_energy)
             xs.append(x)
             recons.append(pcs_recon)
+            masks.append(mask)
             print(f"Decode batch {i}")
             # collect lantents
-            all_mus.append(mu.cpu())
-            all_logvars.append(logvar.cpu())
+            #all_mus.append(mu.cpu())
+            #all_logvars.append(logvar.cpu())
         xs = torch.cat(xs, 0)
         recons = torch.cat(recons, 0)
-        torch.save([xs, recons], f'{args.pthsave}_pcvae_gen_Jan_13.pth')  
+        masks = torch.cat(masks, 0)
+        
+        torch.save([xs, recons, masks], f'{args.pthsave}_pcvae_gen_Jan_13.pth')  
         print(f"Plot save to {args.pthsave}")
         #plot one example
         #plot_4d_reconstruction(x, pcs_recon, saveplot, index=0)
         
         #print(f"Plot save to {saveplot}")
     # Concatenate all batches
-    all_mus = torch.cat(all_mus, dim=0)
-    all_logvars = torch.cat(all_logvars, dim=0)
+    #all_mus = torch.cat(all_mus, dim=0)
+    #all_logvars = torch.cat(all_logvars, dim=0)
     #latent space visualization
 
-    check_latent_distribution(all_mus, saveplot_latent)
+    #check_latent_distribution(all_mus, saveplot_latent)
     #save in dataser folders
-    savedata = "/pscratch/sd/c/ccardona/datasets/"
-    torch.save({'mu': all_mus, 'logvar': all_logvars}, f"{savedata}pcvae_encoded_w_small_dataset_BN.pt")
-    print(f"Latents extracted and saved to {savedata}pcvae_encoded_w_small_dataset_BN.pt")    
+    #savedata = "/pscratch/sd/c/ccardona/datasets/"
+    #torch.save({'mu': all_mus, 'logvar': all_logvars}, f"{savedata}pcvae_encoded_w_small_dataset_BN.pt")
+    #print(f"Latents extracted and saved to {savedata}pcvae_encoded_w_small_dataset_BN.pt")    
     
 
 

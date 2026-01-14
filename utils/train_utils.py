@@ -341,9 +341,9 @@ def vae_loss_function(x, recon_x, mu, logvar, e_init, mask):
     x: [B, 4, N] (target x, y, z, E)
     mask: [B, N] (1 for real hits, 0 for padding)
     """
-    pred_hit_prob = recon_x[:, 4, :] # [B, N]
+    #pred_hit_prob = recon_x[:, 4, :] # [B, N]
     # This forces hit_prob to 0 where the ground truth is padding
-    loss_hit = F.binary_cross_entropy(pred_hit_prob, mask.float())
+    #loss_hit = F.binary_cross_entropy(pred_hit_prob, mask.float())
     
     # Split coordinates and energy
     pred_xyz = recon_x[:, :3, :]
@@ -366,7 +366,7 @@ def vae_loss_function(x, recon_x, mu, logvar, e_init, mask):
 
     # Total loss with weighting (adjust these based on training behavior)
     #TODO here scales for each loss has been hard coded. Pass it from somewhere else
-    return loss_xyz + 0.5 * loss_chamfer + 10.0 * loss_energy + 0.01 * kld_loss+ 2.0 * loss_hit
+    return loss_xyz + 0.5 * loss_chamfer + 10.0 * loss_energy + 0.01 * kld_loss
 
 def masked_chamfer_distance(pc_a, pc_b, mask_a, mask_b):
     """

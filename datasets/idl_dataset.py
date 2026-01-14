@@ -98,6 +98,7 @@ class LazyIDLDataset(Dataset):
                 shower = np.column_stack((indices, values))
                 
                 initial_energy = group.attrs.get("initial_energy", 0.0)
+                initial_energy = ((initial_energy - 10.) / 45.) - 1.0
                 
                 if self.transform:
                     shower = self.transform(shower)

@@ -217,7 +217,6 @@ def train(gpu, opt, output_dir, noises_init):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         x, mask, init_energy, y, gap_pid, idx = data
                         x = x.transpose(1,2)
-                        
                     elif opt.dataname == 'shapenet':
                         x = data['train_points']
                         mask = None

@@ -364,7 +364,6 @@ def vae_loss_function(x, recon_x, mu, logvar, e_init, mask):
     loss_energy = F.mse_loss(pred_e * m, target_e * m)
     #  KLD Loss (Standard VAE)
     kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    breakpoint()
     # Total loss with weighting (adjust these based on training behavior)
     #TODO here scales for each loss has been hard coded. Pass it from somewhere else
     return loss_xyz + 0.1 * loss_chamfer+ loss_energy + 0.001 * kld_loss

@@ -102,7 +102,6 @@ class LazyIDLDataset(Dataset):
                 
                 if self.transform:
                     shower = self.transform(shower)
-
                 return (
                     torch.from_numpy(shower).float(),
                     torch.tensor(initial_energy).float(),

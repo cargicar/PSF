@@ -91,9 +91,9 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
         test_dataset = None
         #te_dataset = LazyPklDataset(os.path.join(dataroot, 'val'), transform
     elif name == 'idl':
-        #transform = NormalizePC4D()
-        transform = None
-        #print(f"warning: using hardcoded E_MIN and E_MAX for energy normalization")
+        transform = NormalizePC4D()
+        #transform = None
+        print(f"warning: using hardcoded E_MIN and E_MAX for energy normalization")
         dataset = IDLDataset(dataroot, transform=transform)#, max_seq_length=npoints, ordering='spatial', material_list=["G4_W", "G4_Ta", "G4_Pb"], inference_mode=False)
         train_dataset = dataset
         test_dataset = None
@@ -350,23 +350,24 @@ def vae_loss_function(x, recon_x, mu, logvar, e_init, mask):
     target_xyz = x[:, :3, :]
     pred_e = recon_x[:, 3, :]
     target_e = x[:, 3, :]
+    #e_init = e_init.squeeze(1)
     m = mask.unsqueeze(1) # [B, 1, N]
     # 1. Coordinate Loss: MSE + Chamfer for Volumetric Shape
     # Chamfer helps fix the "stringy" geometry by encouraging clusters
     loss_xyz = F.mse_loss(pred_xyz * m, target_xyz * m)
     loss_chamfer = masked_chamfer_4d(pred_xyz, target_xyz, mask)
 
-    # 2. Energy Distribution Loss
+    #  Energy Distribution Loss
     # Since sum(pred_e) == e_init, we treat this as a distribution problem.
     # Kullback-Leibler Divergence or simply MSE on the normalized energies.
-    #loss_energy = F.mse_loss(pred_e * m, target_e * m)
-
-    # 3. KLD Loss (Standard VAE)
-    #kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-
+    
+    loss_energy = F.mse_loss(pred_e * m, target_e * m)
+    #  KLD Loss (Standard VAE)
+    kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    breakpoint()
     # Total loss with weighting (adjust these based on training behavior)
     #TODO here scales for each loss has been hard coded. Pass it from somewhere else
-    return loss_xyz + 0.5 * loss_chamfer# + 10.0 * loss_energy + 0.01 * kld_loss
+    return loss_xyz + 0.1 * loss_chamfer+ loss_energy + 0.001 * kld_loss
 
 def masked_chamfer_distance(pc_a, pc_b, mask_a, mask_b):
     """
@@ -407,7 +408,7 @@ def plot_4d_reconstruction(original, reconstructed, savepath=".reconstructed.png
     # original/reconstructed: [B, 4, N]
     orig = original[index].cpu().numpy() # [4, N]
     recon = reconstructed[index].cpu().numpy() # [4, N]
-
+    assert orig.shape[0] == 4
     fig = plt.figure(figsize=(12, 6))
     
     # Plot Original

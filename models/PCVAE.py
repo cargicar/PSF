@@ -77,52 +77,36 @@ class PointCloud4DVAE(nn.Module):
         return recon, mu, logvar
 
 # --- Updated Conditional Decoder ---
-# class ConditionalTransformerSpatialDecoder(nn.Module):
-#     def __init__(self, latent_dim, cond_dim, out_channels=4):
-#         super().__init__()
-#         self.d_model = latent_dim + cond_dim # Combined context size
-        
-#         self.cond_net = nn.Sequential(
-#             nn.Linear(1, cond_dim),
-#             nn.SiLU(),
-#             nn.Linear(cond_dim, cond_dim)
-#         )
-        
-#         # Positional Encoding projection
-#         self.pe_projection = nn.Linear(128, self.d_model)
-        
-#         decoder_layer = nn.TransformerDecoderLayer(
-#             d_model=self.d_model, nhead=8, dim_feedforward=1024, batch_first=True
-#         )
-#         self.transformer = nn.TransformerDecoder(decoder_layer, num_layers=4)
-
-#         #self.fc_out = nn.Linear(self.d_model, out_channels) #Instead Split the output heads
-#         # out_channels-1 is for (x, y, z)
-#         self.fc_coords = nn.Linear(self.d_model, out_channels - 1) 
-        
-#         # The EnergyHead plugged in here
-#         self.fc_energy = nn.Linear(self.d_model, 1)
-#         # To fix the "number of hits" discrepancy where your model predicts a constant 2048 points regardless of the physics, you need to add an Occupancy Head. This allows the model to predict which points in the grid are "real" and which should be discarded as "padding."
-#         # You will add a third branch  that predicts the probability (p∈[0,1]) of a hit being valid.
-#         #self.fc_hit = nn.Linear(self.d_model, 1)
-
 class ConditionalTransformerSpatialDecoder(nn.Module):
     def __init__(self, latent_dim, cond_dim, out_channels=4):
         super().__init__()
         self.d_model = latent_dim + cond_dim # Combined context size
+        
         self.cond_net = nn.Sequential(
             nn.Linear(1, cond_dim),
             nn.SiLU(),
             nn.Linear(cond_dim, cond_dim)
-            )
+        )
+        
         # Positional Encoding projection
         self.pe_projection = nn.Linear(128, self.d_model)
-
+        
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=self.d_model, nhead=8, dim_feedforward=1024, batch_first=True
         )
         self.transformer = nn.TransformerDecoder(decoder_layer, num_layers=4)
-        self.fc_out = nn.Linear(self.d_model, out_channels)
+
+        #self.fc_out = nn.Linear(self.d_model, out_channels) 
+        # Instead Split the output heads
+        # out_channels-1 is for (x, y, z)
+        self.fc_coords = nn.Linear(self.d_model, out_channels - 1) 
+        
+        # The EnergyHead plugged in here
+        self.fc_energy = nn.Linear(self.d_model, 1)
+        # To fix the "number of hits" discrepancy where your model predicts a constant 2048 points regardless of the physics, you need to add an Occupancy Head. This allows the model to predict which points in the grid are "real" and which should be discarded as "padding."
+        # You will add a third branch  that predicts the probability (p∈[0,1]) of a hit being valid.
+        #self.fc_hit = nn.Linear(self.d_model, 1)
+
 
     def generate_2d_grid(self, n, device):
         # Logic same as before: generates [n, 2] grid
@@ -158,21 +142,25 @@ class ConditionalTransformerSpatialDecoder(nn.Module):
         
         #  Cross-Attention
         latent_points = self.transformer(queries, memory)
+        #old out
+        #full_recon = self.fc_out(latent_points)
+        # instead we have two heads: coord head and energy head
         #Coordinate Prediction (x, y, z) (Head Coordinates)
-        # coords = self.fc_coords(latent_points) # [B, N, 3]
-        # # CONSTRAINED Energy Prediction (Head energy)
+        coords = self.fc_coords(latent_points) # [B, N, 3]
+        #  CONSTRAINED Energy Prediction (Head energy)
         # # Apply Softmax across the N dimension so weights sum to 1.0
-        # energy_logits = self.fc_energy(latent_points) # [B, N, 1]
-        # energy_weights = torch.softmax(energy_logits, dim=1)
+        energy_logits = self.fc_energy(latent_points) # [B, N, 1]
+        full_recon = torch.cat([coords, energy_logits], dim=-1)
+        #energy_weights = torch.softmax(energy_logits, dim=1)
         # # Scale by e_init so the total sum matches your condition exactly
         # # e_init is [B, 1], energy_weights is [B, N, 1]
-        # actual_energy = energy_weights * e_init.unsqueeze(1) # [B, N, 1]
-        # full_recon = torch.cat([coords, actual_energy], dim=-1)
+        #actual_energy = energy_weights * e_init.unsqueeze(1) # [B, N, 1]
+        #full_recon = torch.cat([coords, actual_energy], dim=-1)
         # # # Head Hit Probability (Occupancy)
         #hit_prob = torch.sigmoid(self.fc_hit(latent_points)) # [B, N, 1]
         # Combine to [B, 5, N] (x, y, z, E, hit_prob)
         #full_recon = torch.cat([coords, actual_energy, hit_prob], dim=-1)
-        full_recon = self.fc_out(latent_points)
+        
         return full_recon.transpose(1, 2)
     
  # MODEL with LN 

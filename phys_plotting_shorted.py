@@ -15,6 +15,7 @@ import seaborn as sns
 from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
 from scipy.stats import wasserstein_distance
+from datasets.transforms import invert_normalize_pc4d
 
 #vector.register_awkward()
 
@@ -517,51 +518,71 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
     material_list=["G4_Ta","G4_W",]
     material="G4_W"
     # Now expecting 5 channels: x, y, z, E, hit_prob
-    x_tensor, gen_tensor, mask = torch.load(file_path)
-    
+    x_tensor, gen_tensor, mask = torch.load(file_path, map_location= 'cpu')
+    x_tensor = x_tensor.detach()
+    gen_tensor= gen_tensor.detach()
     gen_dict = {"x": [], "y": [], "z": [], "energy": []}
     data_dict = {"x": [], "y": [], "z": [], "energy": []}
     
     if num_showers == -1:
         num_showers = x_tensor.shape[0]
+    with torch.no_grad():
+        for i in range(num_showers):
+            used_transform = True #Create flag and transforms list to invert 
+            if used_transform:
+                x_tensor = invert_normalize_pc4d(x_tensor)
+                gen_tensor = invert_normalize_pc4d(gen_tensor)
+            # Target data (Ground Truth)
+            if x_tensor.shape[1] == 4:
+                x, y, z, e = x_tensor[i] # [4, N]
+                
+                # Generated data (Model Output)
+                # Assuming shape [5, N] where indices are:
+                # 0:x, 1:y, 2:z, 3:E, 4:hit_prob
+                xg, yg, zg, eg = gen_tensor[i] 
+            else:
+                x, y, z, e = x_tensor[i].T # [4, N]
+                # Generated data (Model Output)
+                # Assuming shape [5, N] where indices are:
+                # 0:x, 1:y, 2:z, 3:E, 4:hit_prob
+                xg, yg, zg, eg = gen_tensor[i].T 
+            
+            
+            # --- THE FILTERING STEP ---
+            # Only keep points where the model is confident a hit exists
+            #mask = pg > prob_threshold
+            
+            filtered_xg = xg[mask[i]]
+            filtered_yg = yg[mask[i]]
+            filtered_zg = zg[mask[i]]
+            filtered_eg = eg[mask[i]]
 
-    for i in range(num_showers):
-        # Target data (Ground Truth)
-        x, y, z, e = x_tensor[i] # [4, N]
-        
-        # Generated data (Model Output)
-        # Assuming shape [5, N] where indices are:
-        # 0:x, 1:y, 2:z, 3:E, 4:hit_prob
-        xg, yg, zg, eg = gen_tensor[i] 
+            # Append Ground Truth
+            data_dict["z"].append(x)
+            data_dict["y"].append(y)
+            data_dict["x"].append(z)
+            data_dict["energy"].append(e)
 
-        # --- THE FILTERING STEP ---
-        # Only keep points where the model is confident a hit exists
-        #mask = pg > prob_threshold
-        
-        filtered_xg = xg[mask[i]]
-        filtered_yg = yg[mask[i]]
-        filtered_zg = zg[mask[i]]
-        filtered_eg = eg[mask[i]]
+            # Append Filtered Generated Data
+            # gen_dict["x"].append(filtered_xg)
+            # gen_dict["y"].append(filtered_yg)
+            # gen_dict["z"].append(filtered_zg)
+            # gen_dict["energy"].append(filtered_eg)
 
-        # Append Ground Truth
-        data_dict["x"].append(x)
-        data_dict["y"].append(y)
-        data_dict["z"].append(z)
-        data_dict["energy"].append(e)
-
-        # Append Filtered Generated Data
-        gen_dict["x"].append(filtered_xg)
-        gen_dict["y"].append(filtered_yg)
-        gen_dict["z"].append(filtered_zg)
-        gen_dict["energy"].append(filtered_eg)
-        
-    ak_array_truth = ak.Array(data_dict)
-    ak_array = ak.Array(gen_dict)
+            # Append Filtered Generated Data
+            gen_dict["z"].append(xg)
+            gen_dict["y"].append(yg)
+            gen_dict["x"].append(zg)
+            gen_dict["energy"].append(eg)
+            
+        ak_array_truth = ak.Array(data_dict)
+        ak_array = ak.Array(gen_dict)
     return ak_array, ak_array_truth
 
 def make_plots(file_paths: list[str], #list containig file paths for simulation and generated data
                 material_list=["G4_W"],
-                num_showers=-1):
+                num_showers=-1,
+                title= None):
     #filepath[0] : simulation data
     #filepath[1] : generated data
     #os.makedirs("Plots",exist_ok=True)
@@ -579,13 +600,15 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
         )
 
         #fig.savefig(f"Plots/{filename}_{material}.pdf", dpi=300)
-        fig.savefig(f"Phys_metrics_pcvae.png", dpi=300)
+        #fig.savefig(f"file_paths[0][-4]{title}", dpi=300)
+        fig.savefig(f"{title}", dpi=300)
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Plot generated showers vs ground truth")
     #parser.add_argument("--file_path", type=str, required=True, help="Path to the HDF5 file containing generated showers")
     parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/w_sim/photon-shower-10_corrected_compressed.hdf5')
+    parser.add_argument('--title', default='phys_metrics.png')
     #parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2025-12-26-12-04-19/syn/photon_samples.pth')
     parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-06_clopodit_idl_mask/syn/combined_photon_samples.pth')
     parser.add_argument("--num_showers", type=int, default=2560, help="Number of showers to process (-1 for all)")
@@ -594,4 +617,4 @@ if __name__ == "__main__":
         filepaths = args.dataroot
     else:
         filepaths = [args.dataroot, args.genroot]
-    make_plots(filepaths, num_showers=args.num_showers)
+    make_plots(filepaths, num_showers=args.num_showers, title = args.title)

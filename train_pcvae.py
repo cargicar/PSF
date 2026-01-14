@@ -213,6 +213,9 @@ def train(gpu, opt, output_dir, noises_init):
                 if opt.distribution_type == 'multi':
                     train_sampler.set_epoch(epoch)
                 lr_scheduler.step(epoch)
+                xs = []
+                recons = []
+                masks = []
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         x, mask, init_energy, y, gap_pid, idx = data
@@ -254,13 +257,24 @@ def train(gpu, opt, output_dir, noises_init):
                                     .format(
                                 epoch, opt.niter, i, len(dataloader),loss.item()
                                 ))
-
+                    #TODO temporary. Instead of eval, save the generation and tested with physics metrics outside this script
+                    if i < 21:
+                        xs.append(x)
+                        recons.append(pcs_recon)
+                        masks.append(mask)
+                xs = torch.cat(xs, 0)
+                recons = torch.cat(recons, 0)
+                masks = torch.cat(masks, 0)
+                
+                torch.save([xs, recons, masks], f'{opt.pthsave}_pcvae_train_Jan_14_epoch_{epoch}_m.pth')  
+                print(f"Samples fir testing save to {opt.pthsave}")
+                
                 if (epoch + 1) % opt.vizIter == 0 and should_diag:
                     logger.info('eval')
                     #TODO add validation loader
                     #val_loader = dataloader
                     #pcs, gen = validate(gpu, opt, model, val_loader)
-                    model.eval()
+                    #model.eval()
                     with torch.no_grad():
                         plot_4d_reconstruction(x, pcs_recon, savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
                     if debug and x is not None and pcs_recon is not None:
@@ -336,10 +350,11 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
     parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/')
+    parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=350, help='input batch size')
+    parser.add_argument('--bs', type=int, default=256, help='input batch size')
     parser.add_argument('--workers', type=int, default=32, help='workers')
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)

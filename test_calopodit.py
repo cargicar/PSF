@@ -180,7 +180,7 @@ def test(gpu, opt, output_dir, noises_init):
     model.eval()
     with torch.no_grad():
         for i, data in enumerate(dataloader):
-            if i > 21:
+            if i > 2:
                 break
             if opt.dataname == 'g4' or opt.dataname == 'idl':
                 x, mask, int_energy, y, gap_pid, idx = data
@@ -260,11 +260,6 @@ def test(gpu, opt, output_dir, noises_init):
                 make_phys_plots(x, pts, savepath = outf_syn)
             logger.info('Generation: train')
         
-            if opt.distribution_type == 'multi':
-                dist.barrier()
-                map_location = {'cuda:%d' % 0: 'cuda:%d' % gpu}
-                model.load_state_dict(
-                    torch.load('%s/epoch_%d.pth' % (output_dir, epoch), map_location=map_location)['model_state'])
         xs = torch.cat(xs, 0)
         recons = torch.cat(recons, 0)
         masks = torch.cat(masks, 0)

@@ -228,7 +228,7 @@ class ECAL_Chunked_Dataset(Dataset):
                     if self.inference_mode:
                         ground_truth_cache.append(initial_energy)
                     material_index = self.material_list.index(material)
-                    initial_energy = ((initial_energy - 10.) / 45.) - 1.0 # Scale to roughly -1 to 1
+                    #initial_energy = ((initial_energy - 10.) / 45.) - 1.0 # Scale to roughly -1 to 1
                     #print("Material:", material, "Index:", material_index, "Initial Energy:", initial_energy)
 
                     # Tokenize + order

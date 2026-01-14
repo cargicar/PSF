@@ -265,7 +265,7 @@ def test(gpu, opt, output_dir, noises_init):
         masks = torch.cat(masks, 0)
         
         torch.save([xs, recons, masks], f'{opt.pthsave}_calopodit_gen_Jan_14_m.pth')  
-        print(f"Plot save to {args.pthsave}")
+        print(f"Plot save to {opt.pthsave}")
     
         dist.destroy_process_group()
 

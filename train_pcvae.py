@@ -242,7 +242,7 @@ def train(gpu, opt, output_dir, noises_init):
                     pcs_recon, mu, logvar = model(x, mask, init_energy)
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
                     #loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
-                    loss, loss_xyz, loss_chamfer, loss_energy,  kld_loss = vae_loss_function(x, pcs_recon, mu, logvar, init_energy, mask)
+                    loss, loss_xyz, loss_chamfer, loss_energy, loss_sum_e, kld_loss = vae_loss_function(x, pcs_recon, mu, logvar, init_energy, mask)
                     
                     
                     optimizer.zero_grad()
@@ -253,9 +253,9 @@ def train(gpu, opt, output_dir, noises_init):
 
                     if i % opt.print_freq == 0 and should_diag:
 
-                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    loss_xyz {:>10.4f}, loss_chamfer {:>10.4f}, loss_energy {:>10.4f},  kld_loss{:>10.4f}'
+                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    loss_xyz {:>10.4f}, loss_chamfer {:>10.4f}, loss_energy {:>10.4f}, loss_sum_e {:>10.4f},  kld_loss{:>10.4f}'
                                     .format(
-                                epoch, opt.niter, i, len(dataloader),loss.item(), loss_xyz.item(), loss_chamfer.item(), loss_energy.item(),  kld_loss.item()
+                                epoch, opt.niter, i, len(dataloader),loss.item(), loss_xyz.item(), loss_chamfer.item(), loss_energy.item(), loss_sum_e.item(),  kld_loss.item()
                                 ))
                     #TODO temporary. Instead of eval, save the generation and tested with physics metrics outside this script
                     if i < 21:
@@ -397,9 +397,9 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', type=int, default=8, help='unit: epoch')
-    parser.add_argument('--diagIter', type=int, default=8, help='unit: epoch')
-    parser.add_argument('--vizIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--saveIter', type=int, default=16, help='unit: epoch')
+    parser.add_argument('--diagIter', type=int, default=16, help='unit: epoch')
+    parser.add_argument('--vizIter', type=int, default=16, help='unit: epoch')
     parser.add_argument('--print_freq', type=int, default=32, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')

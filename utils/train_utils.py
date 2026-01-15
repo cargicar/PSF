@@ -360,14 +360,18 @@ def vae_loss_function(x, recon_x, mu, logvar, e_init, mask):
     #  Energy Distribution Loss
     # Since sum(pred_e) == e_init, we treat this as a distribution problem.
     # Kullback-Leibler Divergence or simply MSE on the normalized energies.
-    
+    nparticles = x.shape[2]
     loss_energy = F.mse_loss(pred_e * m, target_e * m)
+    pred_esum= pred_e.sum(dim=1)/nparticles
+    target_esum = target_e.sum(dim=1)/nparticles
+    #energy_weights = torch.softmax(energy_logits, dim=1)
+    loss_sum_e = F.mse_loss(pred_esum, target_esum)
     #  KLD Loss (Standard VAE)
     kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     # Total loss with weighting (adjust these based on training behavior)
     #TODO here scales for each loss has been hard coded. Pass it from somewhere else
-    total_loss = 0.1*loss_xyz + 0.1 * loss_chamfer+ loss_energy + 0.001 * kld_loss
-    return total_loss, 0.1*loss_xyz, 0.1 * loss_chamfer, loss_energy,  0.01 * kld_loss
+    total_loss = 0.1*loss_xyz + 0.1 * loss_chamfer+ loss_energy + loss_sum_e + 0.001 * kld_loss
+    return total_loss, 0.1*loss_xyz, 0.1 * loss_chamfer, loss_energy, loss_sum_e, 0.01 * kld_loss
 
 def masked_chamfer_distance(pc_a, pc_b, mask_a, mask_b):
     """

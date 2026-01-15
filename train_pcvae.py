@@ -189,7 +189,8 @@ def train(gpu, opt, output_dir, noises_init):
     optimizer= optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
     criterion = PointCloudVAELoss(
             lambda_e_sum=0.00001, 
-            lambda_hit=0.000001
+            lambda_hit=0.000001,
+            lambda_chamfer=0.01
     )
     lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
     # This will reach 0.005 by epoch 50
@@ -265,6 +266,7 @@ def train(gpu, opt, output_dir, noises_init):
                                     
                     optimizer.zero_grad()
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
                     if prof is not None:
                         prof.step()
@@ -372,7 +374,7 @@ def parse_args():
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=256, help='input batch size')
+    parser.add_argument('--bs', type=int, default=200, help='input batch size')
     parser.add_argument('--workers', type=int, default=32, help='workers')
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)

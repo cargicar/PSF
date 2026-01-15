@@ -72,7 +72,7 @@ def extract_pcvae_latents_and_reconstruction(args, device="cuda:0"):
     recons = []
     with torch.no_grad():
         for i, data in enumerate(val_loader):
-            if i > 21:
+            if i > 30:
                 break
             
             x, mask, init_energy, y, gap_pid, idx = data
@@ -90,7 +90,7 @@ def extract_pcvae_latents_and_reconstruction(args, device="cuda:0"):
         recons = torch.cat(recons, 0)
         masks = torch.cat(masks, 0)
         
-        torch.save([xs, recons, masks], f'{args.pthsave}_pcvae_gen_Jan_13_m.pth')  
+        torch.save([xs, recons, masks], f'{args.pthsave}_pcvae_gen_Jan_15_m.pth')  
         print(f"Plot save to {args.pthsave}")
         #plot one example
         #plot_4d_reconstruction(x, pcs_recon, saveplot, index=0)

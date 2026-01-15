@@ -480,6 +480,7 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
                 x_tensor = invert_normalize_pc4d(x_tensor)
                 gen_tensor = invert_normalize_pc4d(gen_tensor)
             # Target data (Ground Truth)
+            
             if x_tensor.shape[1] == 4:
                 x, y, z, e = x_tensor[i] # [4, N]
                 

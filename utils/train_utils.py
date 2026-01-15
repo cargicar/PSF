@@ -91,8 +91,8 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
         test_dataset = None
         #te_dataset = LazyPklDataset(os.path.join(dataroot, 'val'), transform
     elif name == 'idl':
-        transform = NormalizePC4D()
-        #transform = None
+        #transform = NormalizePC4D()
+        transform = None
         print(f"warning: using hardcoded E_MIN and E_MAX for energy normalization")
         dataset = IDLDataset(dataroot, transform=transform)#, max_seq_length=npoints, ordering='spatial', material_list=["G4_W", "G4_Ta", "G4_Pb"], inference_mode=False)
         train_dataset = dataset
@@ -366,7 +366,8 @@ def vae_loss_function(x, recon_x, mu, logvar, e_init, mask):
     kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     # Total loss with weighting (adjust these based on training behavior)
     #TODO here scales for each loss has been hard coded. Pass it from somewhere else
-    return loss_xyz + 0.1 * loss_chamfer+ loss_energy + 0.001 * kld_loss
+    total_loss = 0.1*loss_xyz + 0.1 * loss_chamfer+ loss_energy + 0.001 * kld_loss
+    return total_loss, 0.1*loss_xyz, 0.1 * loss_chamfer, loss_energy,  0.01 * kld_loss
 
 def masked_chamfer_distance(pc_a, pc_b, mask_a, mask_b):
     """

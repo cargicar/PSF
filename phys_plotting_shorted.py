@@ -397,121 +397,69 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
 
     return fig        
 
-def read_generated(file_path, material_list=["G4_Ta","G4_W",],num_showers=-1,material="G4_W"):
+# def read_generated(file_path, material_list=["G4_Ta","G4_W",],num_showers=-1,material="G4_W"):
 
 
-    gen_dict = {
-        "x": [],
-        "y": [],
-        "z": [],
-        "energy": []
-    }
-    gen_tensor = torch.load(file_path[1])
-    data_dict = {
-        "x": [],
-        "y": [],
-        "z": [],
-        "energy": [],
-    }
-    with h5py.File(file_path[0],"r") as h5file:
-        #showers = h5file['showers'][()]
-        showers_idx = h5file.keys()
-        if num_showers == -1:
-            num_showers = len(showers_idx)
-        #FIXME temporal 
-        #num_showers = gen_tensor.shape[0]
-        for i,idx in enumerate(showers_idx):
-            if i >= num_showers:
-                break
-            #init_E,spatial,energy,spatial_truth,energy_truth,material_index = shower
-            shower = h5file[idx]
-            E = shower.attrs['initial_energy']
-            x, y, z= shower['indices'][()].T
-            energy = shower['values'][()]
-            mat = shower['material'][()]
-            if mat.decode('utf-8') != material:
-                continue
+#     gen_dict = {
+#         "x": [],
+#         "y": [],
+#         "z": [],
+#         "energy": []
+#     }
+#     gen_tensor = torch.load(file_path[1])
+#     data_dict = {
+#         "x": [],
+#         "y": [],
+#         "z": [],
+#         "energy": [],
+#     }
+#     with h5py.File(file_path[0],"r") as h5file:
+#         #showers = h5file['showers'][()]
+#         showers_idx = h5file.keys()
+#         if num_showers == -1:
+#             num_showers = len(showers_idx)
+#         #FIXME temporal 
+#         #num_showers = gen_tensor.shape[0]
+#         for i,idx in enumerate(showers_idx):
+#             if i >= num_showers:
+#                 break
+#             #init_E,spatial,energy,spatial_truth,energy_truth,material_index = shower
+#             shower = h5file[idx]
+#             E = shower.attrs['initial_energy']
+#             x, y, z= shower['indices'][()].T
+#             energy = shower['values'][()]
+#             mat = shower['material'][()]
+#             if mat.decode('utf-8') != material:
+#                 continue
             
-            xg, yg, zg, eg = gen_tensor[i].T
-            # eg_min = eg.min()
-            #eg_max = eg.max()
-            #eg = (eg - eg_min) / (eg_max - eg_min)   # Rescale to initial energy
-            #xt,yt,zt,Et = decode_hits(spatial_truth,energy_truth)
+#             xg, yg, zg, eg = gen_tensor[i].T
+#             # eg_min = eg.min()
+#             #eg_max = eg.max()
+#             #eg = (eg - eg_min) / (eg_max - eg_min)   # Rescale to initial energy
+#             #xt,yt,zt,Et = decode_hits(spatial_truth,energy_truth)
             
-            if i % 5000 == 0 or i == num_showers:
-                print(f"Shower #: {i}/{num_showers}, Material: {mat}")
+#             if i % 5000 == 0 or i == num_showers:
+#                 print(f"Shower #: {i}/{num_showers}, Material: {mat}")
 
 
-            gen_dict["z"].append(zg)
-            gen_dict["x"].append(xg)
-            gen_dict["y"].append(yg)
-            gen_dict["energy"].append(eg)
+#             gen_dict["z"].append(zg)
+#             gen_dict["x"].append(xg)
+#             gen_dict["y"].append(yg)
+#             gen_dict["energy"].append(eg)
 
-            data_dict["z"].append(z)
-            data_dict["x"].append(x)
-            data_dict["y"].append(y)
-            data_dict["energy"].append(energy)
-            # data_dict_truth["z"].append(xt)
-            # data_dict_truth["x"].append(yt)
-            # data_dict_truth["y"].append(zt)
-            # data_dict_truth["energy"].append(Et)
+#             data_dict["z"].append(z)
+#             data_dict["x"].append(x)
+#             data_dict["y"].append(y)
+#             data_dict["energy"].append(energy)
+#             # data_dict_truth["z"].append(xt)
+#             # data_dict_truth["x"].append(yt)
+#             # data_dict_truth["y"].append(zt)
+#             # data_dict_truth["energy"].append(Et)
         
-        ak_array_truth = ak.Array(data_dict)
-        ak_array = ak.Array(gen_dict)
-        return ak_array, ak_array_truth
+#         ak_array_truth = ak.Array(data_dict)
+#         ak_array = ak.Array(gen_dict)
+#         return ak_array, ak_array_truth
 
-
-def read_generated_pth(file_path, num_showers=-1):
-    material_list=["G4_Ta","G4_W",]
-    material="G4_W"
-    x_tensor, gen_tensor = torch.load(file_path)
-    gen_dict = {
-        "x": [],
-        "y": [],
-        "z": [],
-        "energy": []
-    }
-    
-    data_dict = {
-        "x": [],
-        "y": [],
-        "z": [],
-        "energy": [],
-    }
-    
-    if num_showers == -1:
-        num_showers = x_tensor.shape[0]
-    #FIXME temporal 
-    #num_showers = gen_tensor.shape[0]
-    for i in range(num_showers):
-        x, y, z, e = x_tensor[i]
-        xg, yg, zg, eg = gen_tensor[i]
-        # eg_min = eg.min()
-        #eg_max = eg.max()
-        #eg = (eg - eg_min) / (eg_max - eg_min)   # Rescale to initial energy
-        #xt,yt,zt,Et = decode_hits(spatial_truth,energy_truth)
-        
-        if i % 5000 == 0 or i == num_showers:
-            print(f"Shower #: {i}/{num_showers}, Material: {material}")
-
-
-        gen_dict["x"].append(zg)
-        gen_dict["z"].append(xg)
-        gen_dict["y"].append(yg)
-        gen_dict["energy"].append(eg)
-
-        data_dict["x"].append(z)
-        data_dict["z"].append(x)
-        data_dict["y"].append(y)
-        data_dict["energy"].append(e)
-        # data_dict_truth["z"].append(xt)
-        # data_dict_truth["x"].append(yt)
-        # data_dict_truth["y"].append(zt)
-        # data_dict_truth["energy"].append(Et)
-    
-    ak_array_truth = ak.Array(data_dict)
-    ak_array = ak.Array(gen_dict)
-    return ak_array, ak_array_truth
 
 # read_generated with hit_prob
 def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
@@ -523,12 +471,11 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
     gen_tensor= gen_tensor.detach()
     gen_dict = {"x": [], "y": [], "z": [], "energy": []}
     data_dict = {"x": [], "y": [], "z": [], "energy": []}
-    
     if num_showers == -1:
-        num_showers = x_tensor.shape[0]
+        num_showers = x_tensor.shape[0]-1
     with torch.no_grad():
         for i in range(num_showers):
-            used_transform = True #Create flag and transforms list to invert 
+            used_transform = False #Create flag and transforms list to invert 
             if used_transform:
                 x_tensor = invert_normalize_pc4d(x_tensor)
                 gen_tensor = invert_normalize_pc4d(gen_tensor)
@@ -558,21 +505,21 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
             filtered_eg = eg[mask[i]]
 
             # Append Ground Truth
-            data_dict["z"].append(x)
+            data_dict["x"].append(x)
             data_dict["y"].append(y)
-            data_dict["x"].append(z)
+            data_dict["z"].append(z)
             data_dict["energy"].append(e)
 
             # Append Filtered Generated Data
-            # gen_dict["x"].append(filtered_xg)
-            # gen_dict["y"].append(filtered_yg)
-            # gen_dict["z"].append(filtered_zg)
-            # gen_dict["energy"].append(filtered_eg)
+            gen_dict["x"].append(filtered_xg)
+            gen_dict["y"].append(filtered_yg)
+            gen_dict["z"].append(filtered_zg)
+            gen_dict["energy"].append(filtered_eg)
 
             # Append Filtered Generated Data
-            gen_dict["z"].append(xg)
+            gen_dict["x"].append(xg)
             gen_dict["y"].append(yg)
-            gen_dict["x"].append(zg)
+            gen_dict["z"].append(zg)
             gen_dict["energy"].append(eg)
             
         ak_array_truth = ak.Array(data_dict)

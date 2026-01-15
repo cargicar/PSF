@@ -5,7 +5,7 @@ import math
 
 #TODO find culprit for wrogn statistics at eval mode. Likely, change BN to LN
 class PointCloud4DVAE(nn.Module):
-    def __init__(self, latent_dim=512, cond_dim=128, max_points=2048):
+    def __init__(self, latent_dim=512, cond_dim=128, max_points=1700):
         super().__init__()
         self.latent_dim = latent_dim
         self.cond_dim = cond_dim
@@ -110,7 +110,8 @@ class ConditionalTransformerSpatialDecoder(nn.Module):
 
     def generate_2d_grid(self, n, device):
         # Logic same as before: generates [n, 2] grid
-        side = int(math.sqrt(n))
+        #side = int(math.sqrt(n))
+        side = 30
         x = torch.linspace(-1, 1, side, device=device)
         y = torch.linspace(-1, 1, side, device=device)
         grid = torch.stack(torch.meshgrid(x, y, indexing='ij'), -1).reshape(-1, 2)

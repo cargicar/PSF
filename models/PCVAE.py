@@ -286,9 +286,9 @@ class PointCloudVAELoss(nn.Module):
         # --- 3. EMD Loss (NEW/Optional) ---
         # If enabled, calculate EMD. Note: EMD is expensive.
         # We only apply it if lambda_emd > 0 to save compute.
-        #loss_emd = torch.tensor(0.0, device=preds.device)
-        #if self.lambda_emd > 0:
-        #    loss_emd = self.get_emd_loss(pred_xyz, target_xyz) * self.lambda_emd
+        loss_emd = torch.tensor(0.0, device=preds.device)
+        if self.lambda_emd > 0:
+            loss_emd = self.get_emd_loss(pred_xyz, target_xyz) * self.lambda_emd
 
         # --- 4. Masked Chamfer Distance ---
         # Pairwise squared distances: [B, N_pred, N_gt]
@@ -312,11 +312,11 @@ class PointCloudVAELoss(nn.Module):
         min_dist_target, idx_target = torch.min(dist_sq, dim=1)    # [B, N_gt]
         
         # Loss terms
-        loss_chamfer_target = (min_dist_target * target_mask).sum() / (target_mask.sum() + 1e-6)
-        loss_chamfer_pred   = min_dist_pred.mean()
+        #loss_chamfer_target = (min_dist_target * target_mask).sum() / (target_mask.sum() + 1e-6)
+        #loss_chamfer_pred   = min_dist_pred.mean()
         
         # Apply lambda_chamfer here
-        loss_chamfer = (loss_chamfer_target + loss_chamfer_pred) * self.lambda_chamfer
+        #loss_chamfer = (loss_chamfer_target + loss_chamfer_pred) * self.lambda_chamfer
 
         # --- 5. Local Energy Match ---
         batch_indices = torch.arange(batch_size, device=idx_pred.device).unsqueeze(1).expand(-1, idx_pred.shape[1])
@@ -350,9 +350,10 @@ class PointCloudVAELoss(nn.Module):
         loss_global_e = self.lambda_e_sum * loss_global_E_sum
         loss_hit_weighted = self.lambda_hit * loss_hit_count
         loss_hit_entr = 0.1 * loss_hit_entropy
-        #(loss_emd) + \
-        total_loss = (loss_chamfer) + \
-                     (loss_repulsion) + \
+        
+        #total_loss = (loss_chamfer) + \
+        total_loss  = (loss_repulsion) + \
+                     (loss_emd) + \
                      (loss_local_E) + \
                      (loss_kld) + \
                      (loss_global_e) + \
@@ -360,9 +361,9 @@ class PointCloudVAELoss(nn.Module):
                      (loss_hit_entr)
         return {
             "loss": total_loss,
-            "chamfer": loss_chamfer.item(),
+            #"chamfer": loss_chamfer.item(),
             "repulsion": loss_repulsion.item(), # New log
-           # "emd": loss_emd.item(),             # New log
+            "emd": loss_emd.item(),             # New log
             "local_E": loss_local_E.item(),
             "global_E": loss_global_e.item(),
             "hit_count": loss_hit_weighted.item(),

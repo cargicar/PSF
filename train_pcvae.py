@@ -190,10 +190,10 @@ def train(gpu, opt, output_dir, noises_init):
     criterion = PointCloudVAELoss(
             lambda_e_sum=0.00001, 
             lambda_hit=0.000001,
-            lambda_chamfer=0.01
+            lambda_emd=0.5
     )
     lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
-    # This will reach 0.005 by epoch 50
+    # This will reach 0.005 by epoch 30
     annealer = KLAnnealer(target_kl=0.005, start_epoch=0, end_epoch=30)
 
 
@@ -273,9 +273,9 @@ def train(gpu, opt, output_dir, noises_init):
 
                     if i % opt.print_freq == 0 and should_diag:
 
-                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},  loss_chamfer {:>10.4f}, loss_energy {:>10.4f}, loss_global_e {:>10.4f},  kld_loss{:>10.4f}, hit_count{:>10.4f} '
+                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},  loss_emd {:>10.4f}, loss_energy {:>10.4f}, loss_global_e {:>10.4f},  kld_loss{:>10.4f}, hit_count{:>10.4f} '
                                     .format(
-                                epoch, opt.niter, i, len(dataloader),loss.item(), loss_dict["chamfer"], loss_dict["local_E"], loss_dict["global_E"], loss_dict["kld"], loss_dict["hit_count"]
+                                epoch, opt.niter, i, len(dataloader),loss.item(),  loss_dict["emd"], loss_dict["local_E"], loss_dict["global_E"], loss_dict["kld"], loss_dict["hit_count"]
                                 ))
                     #TODO temporary. Instead of eval, save the generation and tested with physics metrics outside this script
                     if i < 21:
@@ -374,7 +374,7 @@ def parse_args():
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=200, help='input batch size')
+    parser.add_argument('--bs', type=int, default=200, help='input batch size') #lower bs if using repulsion loss
     parser.add_argument('--workers', type=int, default=32, help='workers')
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)

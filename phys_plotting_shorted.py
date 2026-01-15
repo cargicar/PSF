@@ -500,7 +500,7 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
             # Only keep points where the model is confident a hit exists
             #mask = pg > prob_threshold
             #redefine mask
-            mask = pg > 0.7
+            mask = (pg > 0.7) & (eg > 0.1)
             filtered_xg = xg[mask]
             filtered_yg = yg[mask]
             filtered_zg = zg[mask]

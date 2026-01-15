@@ -486,40 +486,41 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
                 # Generated data (Model Output)
                 # Assuming shape [5, N] where indices are:
                 # 0:x, 1:y, 2:z, 3:E, 4:hit_prob
-                xg, yg, zg, eg = gen_tensor[i] 
+                xg, yg, zg, eg, pg = gen_tensor[i] 
             else:
                 x, y, z, e = x_tensor[i].T # [4, N]
                 # Generated data (Model Output)
                 # Assuming shape [5, N] where indices are:
                 # 0:x, 1:y, 2:z, 3:E, 4:hit_prob
-                xg, yg, zg, eg = gen_tensor[i].T 
+                xg, yg, zg, eg, pg = gen_tensor[i].T 
             
             
             # --- THE FILTERING STEP ---
             # Only keep points where the model is confident a hit exists
             #mask = pg > prob_threshold
-            
-            filtered_xg = xg[mask[i]]
-            filtered_yg = yg[mask[i]]
-            filtered_zg = zg[mask[i]]
-            filtered_eg = eg[mask[i]]
+            #redefine mask
+            mask = pg > 0.7
+            filtered_xg = xg[mask]
+            filtered_yg = yg[mask]
+            filtered_zg = zg[mask]
+            filtered_eg = eg[mask]
 
             # Append Ground Truth
-            data_dict["x"].append(x)
+            data_dict["z"].append(x)
             data_dict["y"].append(y)
-            data_dict["z"].append(z)
+            data_dict["x"].append(z)
             data_dict["energy"].append(e)
 
             # Append Filtered Generated Data
-            gen_dict["x"].append(filtered_xg)
+            gen_dict["z"].append(filtered_xg)
             gen_dict["y"].append(filtered_yg)
-            gen_dict["z"].append(filtered_zg)
+            gen_dict["x"].append(filtered_zg)
             gen_dict["energy"].append(filtered_eg)
 
             # Append Filtered Generated Data
-            gen_dict["x"].append(xg)
+            gen_dict["z"].append(xg)
             gen_dict["y"].append(yg)
-            gen_dict["z"].append(zg)
+            gen_dict["x"].append(zg)
             gen_dict["energy"].append(eg)
             
         ak_array_truth = ak.Array(data_dict)

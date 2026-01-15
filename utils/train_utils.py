@@ -364,7 +364,7 @@ def vae_loss_function(x, recon_x, mu, logvar, e_init, mask):
     loss_energy = F.mse_loss(pred_e * m, target_e * m)
     pred_esum= pred_e.sum(dim=1)/nparticles
     target_esum = target_e.sum(dim=1)/nparticles
-    #energy_weights = torch.softmax(energy_logits, dim=1)
+    
     loss_sum_e = F.mse_loss(pred_esum, target_esum)
     #  KLD Loss (Standard VAE)
     kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
@@ -405,7 +405,6 @@ def masked_chamfer_distance(pc_a, pc_b, mask_a, mask_b):
             dist_b_to_a.sum(dim=1) / mask_b.sum(dim=1))
     
     return loss.mean()
-
 
 
 def plot_4d_reconstruction(original, reconstructed, savepath=".reconstructed.png", index=0):

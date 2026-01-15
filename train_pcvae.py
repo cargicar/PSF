@@ -13,7 +13,7 @@ from utils.train_utils import *
 """import models"""
 #from model.pvcnn_generation import PVCNN2Base
 #from model.calopodit import DiT, DiTConfig
-from models.PCVAE import PointCloud4DVAE
+from models.PCVAE import PointCloud4DVAE, PointCloudVAELoss, KLAnnealer
 import torch.distributed as dist
 
 
@@ -187,8 +187,14 @@ def train(gpu, opt, output_dir, noises_init):
         logger.info(opt)
 
     optimizer= optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
-
+    criterion = PointCloudVAELoss(
+            lambda_e_sum=0.00001, 
+            lambda_hit=0.000001
+    )
     lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
+    # This will reach 0.005 by epoch 50
+    annealer = KLAnnealer(target_kl=0.005, start_epoch=0, end_epoch=30)
+
 
     if opt.model_path != '':
         ckpt = torch.load(opt.model_path)
@@ -216,9 +222,10 @@ def train(gpu, opt, output_dir, noises_init):
                 xs = []
                 recons = []
                 masks = []
+                current_kl_weight = annealer.get_weight(epoch)
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
-                        x, mask, init_energy, y, gap_pid, idx = data
+                        x, mask, e_init, y, gap_pid, idx = data
                         x = x.transpose(1,2)
                     elif opt.dataname == 'shapenet':
                         x = data['train_points']
@@ -230,21 +237,32 @@ def train(gpu, opt, output_dir, noises_init):
                         mask = mask.cuda(gpu,  non_blocking=True)
                         y = y.cuda(gpu,  non_blocking=True)
                         gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
-                        init_energy = init_energy.cuda(gpu,  non_blocking=True)
+                        e_init = e_init.cuda(gpu,  non_blocking=True)
+                        criterion = criterion.cuda(gpu)
                         #noises_batch = noises_batch.cuda(gpu)
                     elif opt.distribution_type == 'single':
                         x = x.cuda()
                         mask = mask.cuda()
                         y = y.cuda()
                         gap_pid = gap_pid.cuda()
-                        init_energy = init_energy.cuda()
+                        e_init = e_init.cuda()
+                        criterion = criterion.cuda()
                         #noises_batch = noises_batch.cuda()
-                    pcs_recon, mu, logvar = model(x, mask, init_energy)
+                    pcs_recon, mu, logvar = model(x, mask, e_init)
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
                     #loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
-                    loss, loss_xyz, loss_chamfer, loss_energy, loss_sum_e, kld_loss = vae_loss_function(x, pcs_recon, mu, logvar, init_energy, mask)
-                    
-                    
+                    #loss, loss_xyz, loss_chamfer, loss_energy, loss_sum_e, kld_loss = vae_loss_function(x, pcs_recon, mu, logvar, init_energy, mask)
+                    loss_dict = criterion(
+                            preds=pcs_recon, 
+                            target=x, 
+                            target_mask=mask, 
+                            mu=mu, 
+                            logvar=logvar, 
+                            e_init=e_init,
+                            kl_weight = current_kl_weight,
+                        )
+                    loss = loss_dict['loss']
+                                    
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
@@ -253,9 +271,9 @@ def train(gpu, opt, output_dir, noises_init):
 
                     if i % opt.print_freq == 0 and should_diag:
 
-                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    loss_xyz {:>10.4f}, loss_chamfer {:>10.4f}, loss_energy {:>10.4f}, loss_sum_e {:>10.4f},  kld_loss{:>10.4f}'
+                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},  loss_chamfer {:>10.4f}, loss_energy {:>10.4f}, loss_global_e {:>10.4f},  kld_loss{:>10.4f}, hit_count{:>10.4f} '
                                     .format(
-                                epoch, opt.niter, i, len(dataloader),loss.item(), loss_xyz.item(), loss_chamfer.item(), loss_energy.item(), loss_sum_e.item(),  kld_loss.item()
+                                epoch, opt.niter, i, len(dataloader),loss.item(), loss_dict["chamfer"], loss_dict["local_E"], loss_dict["global_E"], loss_dict["kld"], loss_dict["hit_count"]
                                 ))
                     #TODO temporary. Instead of eval, save the generation and tested with physics metrics outside this script
                     if i < 21:

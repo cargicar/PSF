@@ -247,6 +247,74 @@ class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
 
         return loss
 
+def plot_4d_reconstruction(original, reconstructed, savepath=".reconstructed.png", index=0):
+    # original/reconstructed: [B, 4, N]
+    orig = original[index].cpu().numpy() # [4, N]
+    recon = reconstructed[index].cpu().numpy() # [4, N]
+    assert orig.shape[0] == 4
+    fig = plt.figure(figsize=(12, 6))
+    
+    # Plot Original
+    ax1 = fig.add_subplot(121, projection='3d')
+    sc1 = ax1.scatter(orig[0], orig[1], orig[2], c=orig[3], cmap='viridis', s=2)
+    ax1.set_title("Original (Color=Energy)")
+    
+    # Plot Reconstruction
+    ax2 = fig.add_subplot(122, projection='3d')
+    sc2 = ax2.scatter(recon[0], recon[1], recon[2], c=recon[3], cmap='viridis', s=2)
+    ax2.set_title("Reconstructed")
+    
+    plt.colorbar(sc2, ax=ax2, label='Energy Value')
+    fig.savefig(f"{savepath}", dpi=300)
+    plt.close(fig)
+
+def make_phys_plots(real, gen, material_list=["G4_W"], savepath="./Phys_plots/"):
+    #TODO read the gap_pid and pass it to the plotting function
+    material = material_list[0]
+    gen_dict = {
+        "x": [],
+        "y": [],
+        "z": [],
+        "energy": []
+    }
+    data_dict = {
+        "x": [],
+        "y": [],
+        "z": [],
+        "energy": [],
+    }
+    for i in range(gen.shape[0]):
+        if real[i].shape[0]==4:
+            x, y, z, e = real[i]
+            xg, yg, zg, eg = gen[i]
+        else:
+            x, y, z, e = real[i].T
+            xg, yg, zg, eg = gen[i].T
+
+
+        gen_dict["x"].append(zg)
+        gen_dict["z"].append(xg)
+        gen_dict["y"].append(yg)
+        gen_dict["energy"].append(eg)
+
+        data_dict["x"].append(z)
+        data_dict["z"].append(x)
+        data_dict["y"].append(y)
+        data_dict["energy"].append(e)
+                
+        ak_array_truth = ak.Array(data_dict)
+        ak_array_gen = ak.Array(gen_dict)
+
+    fig = plot_paper_plots(
+            [ak_array_truth, ak_array_gen],
+            labels=["Ground Truth", "Generated"],
+            colors=["lightgrey", "cornflowerblue"], material=material
+        )
+        #fig.savefig(f"Plots/{filename}_{material}.pdf", dpi=300)
+    fig.savefig(f"{savepath}/phys_metrics.png", dpi=300)
+    plt.close(fig)
+
+
 def make_phys_plots(real, gen, material_list=["G4_W"], savepath="./Phys_plots/"):
     #TODO read the gap_pid and pass it to the plotting function
     material = material_list[0]

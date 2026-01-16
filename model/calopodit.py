@@ -18,13 +18,52 @@ import os
 import json
 import math
 
-from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+from timm.models.vision_transformer import Mlp
 from model.PTransformer import TransformerBlock
 #from src.models.edge_conv import EdgeConvBlock
 
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
 
+#replacing timm Attention for nn.MultuheadAttention
+class NativeAttention(nn.Module):
+    def __init__(self, dim, num_heads, qkv_bias=True, attn_drop=0., proj_drop=0.):
+        super().__init__()
+        self.mha = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=attn_drop,
+            bias=qkv_bias,
+            batch_first=True  # Critical: Matches (Batch, Points, Dim) layout
+        )
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x, mask=None):
+        """
+        x: (Batch, Points, Dim)
+        mask: (Batch, Points) Boolean tensor. True=Keep, False=Pad/Ignore.
+        """
+        key_padding_mask = None
+        if mask is not None:
+            # nn.MultiheadAttention expects:
+            # True = IGNORE (Pad)
+            # False = KEEP
+            # Your mask is True=Keep, so we must invert it with ~
+            key_padding_mask = ~mask.bool()
+
+        # We pass 'x' for query, key, and value (Self-Attention)
+        # need_weights=False is important for FlashAttention optimization
+        out, _ = self.mha(
+            query=x, 
+            key=x, 
+            value=x, 
+            key_padding_mask=key_padding_mask, 
+            need_weights=False 
+        )
+        
+        return self.proj_drop(out)
 
 #TODO: Implement EdgeConv from DGCNN as an laternative of PatchEmbedPointTransformer
 def modulate(x, shift, scale):
@@ -234,6 +273,70 @@ class EnergyEmbedder(nn.Module):
 
         return embeddings
 
+# Add this class
+class SineSpatialEmbedder(nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        # Projects 3D coords -> Hidden Size
+        self.mlp = nn.Sequential(
+            nn.Linear(3, hidden_size),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
+
+    def forward(self, x):
+        # Assumes x contains coords in first 3 channels
+        return self.mlp(x)
+    
+#############################################################################3
+#               Point Embedder                                                 #
+##########################################################################
+class PointEmbedder(nn.Module):
+    """
+    A stack of TransformerBlocks that acts as the 'Tokenizer' for the DiT.
+    It progressively lifts the input from raw coordinates to high-dim latent features.
+
+    Deeper Receptive Field: In Block 1, a point sees its k immediate neighbors. In Block 2, it sees neighbors of neighbors (indirectly), allowing it to understand larger shapes.
+
+    Dynamic Grouping: Because Block 2 calculates distances on the features output by Block 1 (not the XYZ coordinates), it effectively groups points that "look similar" in feature space, even if they aren't physically next to each other. This is the core strength of DGCNN-style architectures.
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.blocks = nn.ModuleList()
+        
+        # --- Block 1: Raw Input -> Hidden Size ---
+        # Input: (B, N, 4) -> Output: (B, N, 256)
+        self.blocks.append(TransformerBlock(
+            in_features=config.in_features,          # 4
+            transformer_features=config.transformer_features, # 32 (Bottleneck dim)
+            d_model=config.hidden_size,              # 256
+            k=config.k                               # 8
+        ))
+        
+        # --- Block 2: Hidden Size -> Hidden Size ---
+        # Input: (B, N, 256) -> Output: (B, N, 256)
+        # Note: We increase transformer_features here to avoid compressing 
+        # the rich 256-dim features back down to 32 too aggressively.
+        # We generally want the internal dim to be closer to the d_model in deeper layers.
+        #second_block_internal_dim = config.hidden_size // 4 # e.g. 64 or 128
+        #lets keep it the same size for now
+        second_block_internal_dim = config.hidden_size # e.g. 64 or 128
+        
+        self.blocks.append(TransformerBlock(
+            in_features=config.hidden_size,          # 256 (Input from Block 1)
+            transformer_features=second_block_internal_dim, 
+            d_model=config.hidden_size,              # 256 (Maintains size)
+            k=config.k
+        ))
+
+    def forward(self, x, mask=None):
+        # x shape: (B, N, 4)
+        for block in self.blocks:
+            # Your TransformerBlock returns (features, attn_map)
+            # We only need 'features' for the next step
+            x, _ = block(x, mask=mask)
+            
+        return x # (B, N, 256)
 #################################################################################
 #                                 Core DiT Model                                #
 #################################################################################
@@ -247,7 +350,8 @@ class DiTBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, skip=False):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True)
+        #self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True)
+        self.attn = NativeAttention(hidden_size, num_heads=num_heads, qkv_bias=True)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -270,28 +374,11 @@ class DiTBlock(nn.Module):
         if self.skip_linear is not None:
             x = self.skip_linear(torch.cat([x, x_skip], dim=-1))
 
-        #NOTE Pass mask to self.attn
-        # TIMM Attention expects 'attn_mask'. Note: Check if your timm version 
-        # uses 'mask' or 'attn_mask'. Usually, it's 'attn_mask'.
-        # --- NEW MASK PREPARATION ---
-        attn_mask = None
-        if mask is not None:
-            # mask shape: [Batch, Points] (125, 2055)
-            # We need: [Batch, 1, 1, Points] to broadcast across heads and queries
-            attn_mask = mask.unsqueeze(1).unsqueeze(2) 
-            
-            # PyTorch SDPA uses boolean masks where:
-            # False = MASK OUT (ignore), True = KEEP
-            # Ensure your mask is boolean
-            attn_mask = attn_mask.bool()
-        # ----------------------------
         x = x + gate_msa.unsqueeze(1) * self.attn(
             modulate(self.norm1(x), shift_msa, scale_msa),
-            attn_mask=attn_mask 
+            mask=mask 
         )
-        # x = x + gate_msa.unsqueeze(1) * self.attn(
-        #     modulate(self.norm1(x), shift_msa, scale_msa)
-        # )
+        
         x = x + gate_mlp.unsqueeze(1) * self.mlp(
             modulate(self.norm2(x), shift_mlp, scale_mlp)
         )
@@ -366,12 +453,17 @@ class DiT(nn.Module):
         # )
         #FIXME add flag to  pick between PT, EConv, PFS 
         #NOTE point transformer replaced PatchEmbed
-        self.x_embedder = TransformerBlock(
-            config.in_features,
-            config.hidden_size,#config.transformer_features,
-            config.hidden_size,
-            config.k,
-            )
+        # AKA Tokenizer
+        #S ingle Transformer Block
+        # self.x_embedder = TransformerBlock(
+        #     config.in_features,
+        #     config.hidden_size,#config.transformer_features,
+        #     config.hidden_size,
+        #     config.k,
+        #     )
+        # Two blocks for improved complex geometric extraction
+        self.x_embedder = PointEmbedder(config)
+
         #NOTE  EdgeConvBlock replaced point transformer
         # self.x_embedder = EdgeConvBlock(
         #     config.in_features,
@@ -379,6 +471,8 @@ class DiT(nn.Module):
         #     config.hidden_size,
         #     config.k,
         #     )
+
+        self.pos_embedder = SineSpatialEmbedder(config.hidden_size)
         
         self.t_embedder = TimestepEmbedder(config.hidden_size)
         if config.num_classes > 0:  # conditional generation on particle labels
@@ -436,13 +530,13 @@ class DiT(nn.Module):
         # self.final_layer = FinalLayer(
         #     config.hidden_size, config.patch_size, self.out_channels
         # )
-        self.final_conv = (
-            nn.Conv2d(config.out_channels, config.out_channels, 3, padding=1)
-            if config.final_conv
-            else nn.Identity()
-        )
-
-        self.initialize_weights()
+        
+        # self.final_conv = (
+        #     nn.Conv2d(config.out_channels, config.out_channels, 3, padding=1)
+        #     if config.final_conv
+        #     else nn.Identity()
+        # )
+        self.final_conv = nn.Linear(config.out_channels, config.out_channels) if config.final_conv else nn.Identity()
 
     def initialize_weights(self):
         # Initialize transformer layers:
@@ -561,9 +655,18 @@ class DiT(nn.Module):
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
         """
-        x= self.x_embedder(x, mask = mask)[0] # (points:(N,P,transformer_features))
-        #x = (x_emb + self.pos_embed)  # (N, T, D), where T = H * W / patch_size ** 2
+
+        # Extract explicit coordinates (assuming first 3 channels are x,y,z)
+        coords = x[..., :3] 
+        #x_features = self.x_embedder(x, mask=mask)[0] # for single transofrmer block (points:(N,P,transformer_features)) 
+        x_features = self.x_embedder(x, mask=mask) # for twoblock point embedder PointEmbedder returns just the features
         
+        # Add absolute position info to the features
+        pos_emb = self.pos_embedder(coords)
+        x = x_features + pos_emb 
+
+
+        x= self.x_embedder(x, mask = mask)[0] 
         #t = self.t_embedder(t)  # (N, D)
         c = self.t_embedder(t)  # c is (N, D)
         #Sequentially add other embeddings to 'c'
@@ -584,17 +687,26 @@ class DiT(nn.Module):
         #'c' contains t + y (+ gap) (+ energy) 
         skips = []
         for idx, block in enumerate(self.in_blocks):
-            x = block(x, c, mask = mask)  # (N, T, D)
+            #x = block(x, c, mask = mask)  # (N, T, D)
+            x = checkpoint(block, x, c, mask, use_reentrant=False)
             skips.append(x)
 
-        x = self.mid_block(x, c, mask)  # (N, T, D)
-
+        #x = self.mid_block(x, c, mask)  # (N, T, D)
+        x = checkpoint(self.mid_block, x, c, mask, use_reentrant=False)
+        
         for block in self.out_blocks:
-            x = block(x, c, mask = mask, x_skip=skips.pop())  # (N, T, D), with long skip connections
+            #x = block(x, c, mask = mask, x_skip=skips.pop())  # (N, T, D), with long skip connections
+            x_skip = skips.pop()
+            # checkpoint expects: function, arg1, arg2...
+            x = checkpoint(block, x, c, mask, x_skip, use_reentrant=False)
         x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
         #NOTE Not needed for point transformer?
         #x = self.unpatchify(x)  # (N, out_channels, H, W)
         x = self.final_conv(x)  # (N, out_channels, H, W)
+        # x shape is (N, Points, C)
+        x = self.final_conv(x)
+        self.initialize_weights()
+
 
         #NOTE Zero out the padded points in the output
         if mask is not None:
@@ -602,6 +714,7 @@ class DiT(nn.Module):
             x = x * mask.unsqueeze(-1)
             
         return x
+    
     def forward_with_cfg(self, x, t, y, gap, energy, mask, cfg_scale):
         """
         Forward pass with Classifier-Free Guidance extrapolation.

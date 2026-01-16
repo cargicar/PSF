@@ -1,6 +1,7 @@
 import torch.multiprocessing as mp
 import torch.optim as optim
 import torch.utils.data
+from torch.cuda.amp import GradScaler, autocast
 
 
 import argparse
@@ -76,6 +77,21 @@ def profiler_table_output(prof, output_filename="profiling/cuda_memory_profile.t
         f.write(profiler_table_output)
 
     print(f"Profiler table saved to {output_filename}")
+
+def gather_all_gpu_tensors(local_tensor):
+    # Ensure tensor is contiguous before gathering (crucial after transpose operations)
+    print(f"gathering tensors from gpus to save samples...")
+    local_tensor = local_tensor.contiguous()
+    
+    # Create a list to hold the gathered tensors (one for each GPU)
+    world_size = dist.get_world_size()
+    gathered_list = [torch.zeros_like(local_tensor) for _ in range(world_size)]
+    
+    # Collect data from all ranks
+    dist.all_gather(gathered_list, local_tensor)
+    print(f"tensors gathered.")
+    # Concatenate along the batch dimension (dim 0) to get size 256
+    return torch.cat(gathered_list, dim=0)
 
 def train(gpu, opt, output_dir, noises_init):
     debug = False
@@ -177,10 +193,14 @@ def train(gpu, opt, output_dir, noises_init):
 
     lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
 
+    scaler = GradScaler(enabled=True)
+
     if opt.model != '':
         ckpt = torch.load(opt.model)
         model.load_state_dict(ckpt['model_state'])
         #optimizer.load_state_dict(ckpt['optimizer_state'])
+        if 'scaler_state' in ckpt: 
+            scaler.load_state_dict(ckpt['scaler_state'])
 
     if opt.model != '':
         start_epoch = torch.load(opt.model)['epoch'] + 1
@@ -217,6 +237,7 @@ def train(gpu, opt, output_dir, noises_init):
                 if opt.distribution_type == 'multi':
                     train_sampler.set_epoch(epoch)
                 lr_scheduler.step(epoch)
+                
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         x, mask, int_energy, y, gap_pid, idx = data
@@ -251,29 +272,33 @@ def train(gpu, opt, output_dir, noises_init):
                         #noises_batch = noises_batch.cuda()
                     
                     rectified_flow.device = x.device      
-                    
-                    x_0 = rectified_flow.sample_source_distribution(x.shape[0])
-                    if opt.model_name == "pvcnn2":
-                        x_0 = x_0.transpose(1,2)
-                    t = rectified_flow.sample_train_time(x.shape[0])
-                    t= t.squeeze()
-                    #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
-                    loss = rectified_flow.get_loss(
-                                x_0=x_0,
-                                x_1=x,
-                                y= y,
-                                gap= gap_pid,
-                                energy=int_energy,
-                                t=t,
-                                mask = mask,
-                            )
                     optimizer.zero_grad()
-                    loss.backward()
+                    with autocast(enabled=True):
+                        x_0 = rectified_flow.sample_source_distribution(x.shape[0])
+                        if opt.model_name == "pvcnn2":
+                            x_0 = x_0.transpose(1,2)
+                        t = rectified_flow.sample_train_time(x.shape[0])
+                        t= t.squeeze()
+                        #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
+                        loss = rectified_flow.get_loss(
+                                    x_0=x_0,
+                                    x_1=x,
+                                    y= y,
+                                    gap= gap_pid,
+                                    energy=int_energy,
+                                    t=t,
+                                    mask = mask,
+                                )
+                    scaler.scale.loss.backward()
+                    if hasattr(opt, 'grad_clip') and opt.grad_clip is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
                     #netpNorm, netgradNorm = getGradNorm(model)
                     #if opt.grad_clip is not None:
                     #    torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
 
-                    optimizer.step()
+                    scaler.step(optimizer)
+                    scaler.update()
                     if prof is not None:
                         prof.step()
 
@@ -283,9 +308,8 @@ def train(gpu, opt, output_dir, noises_init):
                                     .format(
                                 epoch, opt.niter, i, len(dataloader),loss.item()
                                 ))
-
-                
-                
+                    #TODO temporary. Instead of eval, save the generation and tested with physics metrics outside this script
+                    
                 if (epoch + 1) % opt.vizIter == 0 and should_diag:
                     logger.info('Generation: eval')
 
@@ -306,53 +330,45 @@ def train(gpu, opt, output_dir, noises_init):
                                 
                         # Sample method
                         #FIXME we should be using a validatioon small dataset instead
-                        traj1 = euler_sampler.sample_loop(
-                            seed=233,
-                            y=y,
-                            gap= gap_pid,
-                            energy=int_energy,
-                            mask=mask,
-                            num_samples=num_samples,
-                            num_steps=num_steps,
-                            )
-                        pts= traj1.x_t
-                        trajectory = traj1.trajectories
+                        with autocast(enabled=True):
+                            traj1 = euler_sampler.sample_loop(
+                                seed=233,
+                                y=y,
+                                gap= gap_pid,
+                                energy=int_energy,
+                                mask=mask,
+                                num_samples=num_samples,
+                                num_steps=num_steps,
+                                )
+                            pts= traj1.x_t
+                            trajectory = traj1.trajectories
+                        if opt.distribution_type == 'multi':
+                            full_x = gather_all_gpu_tensors(x)
+                            full_pts = gather_all_gpu_tensors(pts)
+                            full_mask = gather_all_gpu_tensors(mask)
+                        else:
+                            # Fallback for single GPU training
+                            full_x, full_pts, full_mask = x, pts, mask
+                        if gpu ==0:
+                            torch.save([full_x, full_pts, full_mask], f'{opt.pthsave}calopodit_train_Jan_16_epoch_{epoch}_m.pth')  
+                            print(f"Samples fir testing save to {opt.pthsave}")
                         
-                        #Ehistogram(X,pts, y, gap_pid, energy, title=f"Ehist_calopodit_del")
-                        #plot_batch_3d(pts, y, gaps=gap_pid, energies= energy, title = "Model sampler_G4")
+                        with torch.no_grad():
+                            plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
+                    # if debug:
+                    #     visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
+                    #                             trajectory, None, None,
+                    #                             None)
 
-                        #cf = chamfer_distance(X, pts, squared=True)
-                        #print(f"Chamfer Batch AVG Distance calopodit sampler: {cf.item():.6f}")
-                
+                    #     visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
+                    #                             pts, None,
+                    #                             None,
+                    #                             None)
 
-                        # x_gen_eval = model.gen_samples(new_x_chain(x, 25).shape, x.device, clip_denoised=False)
-                        # x_gen_list = model.gen_sample_traj(new_x_chain(x, 1).shape, x.device, freq=40, clip_denoised=False)
-                        # x_gen_all = torch.cat(x_gen_list, dim=0)
-
-                        # gen_stats = [x_gen_eval.mean(), x_gen_eval.std()]
-                        # gen_eval_range = [x_gen_eval.min().item(), x_gen_eval.max().item()]
-
-                        # logger.info('      [{:>3d}/{:>3d}]  '
-                        #              'eval_gen_range: [{:>10.4f}, {:>10.4f}]     '
-                        #              'eval_gen_stats: [mean={:>10.4f}, std={:>10.4f}]      '
-                        #     .format(
-                        #     epoch, opt.niter,
-                        #     *gen_eval_range, *gen_stats,
-                            # ))
-                    if debug:
-                        visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                                                trajectory, None, None,
-                                                None)
-
-                        visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
-                                                pts, None,
-                                                None,
-                                                None)
-
-                        visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x, None,
-                                                    None,
-                                                    None)
-                        make_phys_plots(x, pts, savepath = outf_syn)
+                    #     visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x, None,
+                    #                                 None,
+                    #                                 None)
+                    #     #make_phys_plots(x, pts, savepath = outf_syn)
                     logger.info('Generation: train')
                     model.train()
                     
@@ -417,9 +433,10 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
     parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/')
     parser.add_argument('--category', default='all', help='category of dataset')
+    parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=256, help='input batch size')
+    parser.add_argument('--bs', type=int, default=32, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
@@ -456,7 +473,7 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=2e-4, help='learning rate for E, default=0.0002')
     parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
     parser.add_argument('--decay', type=float, default=0, help='weight decay for EBM')
-    parser.add_argument('--grad_clip', type=float, default=None, help='weight decay for EBM')
+    parser.add_argument('--grad_clip', type=float, default=1.0, help='weight decay for EBM')
     parser.add_argument('--lr_gamma', type=float, default=0.998, help='lr decay for EBM')
 
     parser.add_argument('--model', default='', help="path to model (to continue training)")

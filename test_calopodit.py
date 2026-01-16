@@ -244,20 +244,22 @@ def test(gpu, opt, output_dir, noises_init):
                 recons.append(pts)
                 masks.append(mask)
                 print(f"Generating batch {i}")
-            if debug:
-                visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                                        trajectory, None, None,
-                                        None)
+                with torch.no_grad():
+                        plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
+                # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
+                #                         trajectory, None, None,
+                #                         None)
 
-                visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
-                                        pts, None,
-                                        None,
-                                        None)
+                # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval_all.png' % (outf_syn, epoch),
+                #                         pts, None,
+                #                         None,
+                #                         None)
 
-                visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x, None,
-                                            None,
-                                            None)
-                make_phys_plots(x, pts, savepath = outf_syn)
+                # visualize_pointcloud_batch('%s/epoch_%03d_x.png' % (outf_syn, epoch), x, None,
+                #                             None,
+                #                             None)
+                #make_phys_plots(x, pts, savepath = outf_syn)
+
             logger.info('Generation: train')
         
         xs = torch.cat(xs, 0)

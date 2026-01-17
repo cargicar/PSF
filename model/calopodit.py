@@ -303,13 +303,13 @@ class PointEmbedder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.blocks = nn.ModuleList()
-        
+        intermediate_dim = config.hidden_size // 2 # e.g., 64
         # --- Block 1: Raw Input -> Hidden Size ---
         # Input: (B, N, 4) -> Output: (B, N, 256)
         self.blocks.append(TransformerBlock(
             in_features=config.in_features,          # 4
-            transformer_features=config.transformer_features, # 32 (Bottleneck dim)
-            d_model=config.hidden_size,              # 256
+            transformer_features=  config.hidden_size,#intermediate_dim, # # 64 (Bottleneck dim)
+            d_model=config.hidden_size,              # 128
             k=config.k                               # 8
         ))
         
@@ -318,14 +318,11 @@ class PointEmbedder(nn.Module):
         # Note: We increase transformer_features here to avoid compressing 
         # the rich 256-dim features back down to 32 too aggressively.
         # We generally want the internal dim to be closer to the d_model in deeper layers.
-        #second_block_internal_dim = config.hidden_size // 4 # e.g. 64 or 128
-        #lets keep it the same size for now
-        second_block_internal_dim = config.hidden_size # e.g. 64 or 128
         
         self.blocks.append(TransformerBlock(
-            in_features=config.hidden_size,          # 256 (Input from Block 1)
-            transformer_features=second_block_internal_dim, 
-            d_model=config.hidden_size,              # 256 (Maintains size)
+            in_features=config.hidden_size,      # 64 (Input from Block 1)
+            transformer_features=config.hidden_size, 
+            d_model=config.hidden_size,              # 128 (Maintains size)
             k=config.k
         ))
 
@@ -336,7 +333,7 @@ class PointEmbedder(nn.Module):
             # We only need 'features' for the next step
             x, _ = block(x, mask=mask)
             
-        return x # (B, N, 256)
+        return x # (B, N, 128)
 #################################################################################
 #                                 Core DiT Model                                #
 #################################################################################
@@ -454,15 +451,15 @@ class DiT(nn.Module):
         #FIXME add flag to  pick between PT, EConv, PFS 
         #NOTE point transformer replaced PatchEmbed
         # AKA Tokenizer
-        #S ingle Transformer Block
-        # self.x_embedder = TransformerBlock(
-        #     config.in_features,
-        #     config.hidden_size,#config.transformer_features,
-        #     config.hidden_size,
-        #     config.k,
-        #     )
+        # Single Transformer Block
+        self.x_embedder = TransformerBlock(
+            config.in_features,
+            config.hidden_size,#config.transformer_features,
+            config.hidden_size,
+            config.k,
+            )
         # Two blocks for improved complex geometric extraction
-        self.x_embedder = PointEmbedder(config)
+        #self.x_embedder = PointEmbedder(config)
 
         #NOTE  EdgeConvBlock replaced point transformer
         # self.x_embedder = EdgeConvBlock(
@@ -658,15 +655,16 @@ class DiT(nn.Module):
 
         # Extract explicit coordinates (assuming first 3 channels are x,y,z)
         coords = x[..., :3] 
-        #x_features = self.x_embedder(x, mask=mask)[0] # for single transofrmer block (points:(N,P,transformer_features)) 
-        x_features = self.x_embedder(x, mask=mask) # for twoblock point embedder PointEmbedder returns just the features
+        x_features = self.x_embedder(x, mask=mask)[0] # for single transofrmer block (points:(N,P,transformer_features)) 
+        
+        #x_features = self.x_embedder(x, mask=mask) # for twoblock point embedder PointEmbedder returns just the features
         
         # Add absolute position info to the features
         pos_emb = self.pos_embedder(coords)
         x = x_features + pos_emb 
 
 
-        x= self.x_embedder(x, mask = mask)[0] 
+        x= self.x_embedder(x, mask = mask)
         #t = self.t_embedder(t)  # (N, D)
         c = self.t_embedder(t)  # c is (N, D)
         #Sequentially add other embeddings to 'c'

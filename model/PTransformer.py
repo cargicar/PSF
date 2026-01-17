@@ -109,8 +109,9 @@ class SetAbstraction(nn.Module):
         return new_xyz, new_features
 
 class TransformerBlock(nn.Module):
-    def __init__(self, in_features, transformer_features, d_model, k) -> None: #transformer_features: 32
+    def __init__(self, in_features, transformer_features, d_model, k) -> None: 
         super().__init__()
+        breakpoint()
         self.fc0 = nn.Sequential(
             nn.Linear(in_features, transformer_features),
             nn.ReLU(),

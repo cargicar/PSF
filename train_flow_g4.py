@@ -350,7 +350,7 @@ def train(gpu, opt, output_dir, noises_init):
                             # Fallback for single GPU training
                             full_x, full_pts, full_mask = x, pts, mask
                         if gpu ==0:
-                            torch.save([full_x, full_pts, full_mask], f'{opt.pthsave}calopodit_train_Jan_16_epoch_{epoch}_m.pth')  
+                            torch.save([full_x, full_pts, full_mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
                             print(f"Samples fir testing save to {opt.pthsave}")
                         
                         with torch.no_grad():

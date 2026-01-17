@@ -265,15 +265,24 @@ class EnergyEmbedder(nn.Module):
             else:
                 drop_ids = force_drop_ids.bool()
 
-            # Broadcast the null embedding to the samples marked for dropout
-            #null_broadcast = self.null_embedding.expand(B, self.hidden_size)
-            null_emb_cast = self.null_embedding.to(dtype=embeddings.dtype) # due to autocast
-            
-            # Now expand
+            # # Broadcast the null embedding to the samples marked for dropout
+            # null_broadcast = self.null_embedding.expand(B, self.hidden_size)
+                        
+            # # Replace the generated embeddings with the null embedding
+            # embeddings[drop_ids] = null_broadcast[drop_ids]
+            # 3. Prepare Null Embedding
+            # Cast to match embeddings dtype (Fixes the Float16/Float32 error)
+            null_emb_cast = self.null_embedding.to(dtype=embeddings.dtype)
             null_broadcast = null_emb_cast.expand(B, self.hidden_size)
             
-            # Replace the generated embeddings with the null embedding
-            embeddings[drop_ids] = null_broadcast[drop_ids]
+            # 4. Apply Mask SAFELY (Out-of-place)
+            # Use torch.where instead of indexing assignment.
+            # We unsqueeze drop_ids to (B, 1) to broadcast across the hidden dimension.
+            embeddings = torch.where(
+                drop_ids.unsqueeze(1), 
+                null_broadcast, 
+                embeddings
+            )
 
         return embeddings
 
@@ -293,7 +302,7 @@ class SineSpatialEmbedder(nn.Module):
         return self.mlp(x)
     
 #############################################################################3
-#               Point Embedder                                                 #
+#               Point Embedder  (Unused)                                 #
 ##########################################################################
 class PointEmbedder(nn.Module):
     """
@@ -456,14 +465,14 @@ class DiT(nn.Module):
         #NOTE point transformer replaced PatchEmbed
         # AKA Tokenizer
         # Single Transformer Block
-        # self.x_embedder = TransformerBlock(
-        #     config.in_features,
-        #     config.hidden_size,#config.transformer_features,
-        #     config.hidden_size,
-        #     config.k,
-        #     )
+        self.x_embedder = TransformerBlock(
+            config.in_features,
+            config.hidden_size,#config.transformer_features,
+            config.hidden_size,
+            config.k,
+            )
         # Two blocks for improved complex geometric extraction
-        self.x_embedder = PointEmbedder(config)
+        #self.x_embedder = PointEmbedder(config)
 
         #NOTE  EdgeConvBlock replaced point transformer
         # self.x_embedder = EdgeConvBlock(
@@ -659,9 +668,9 @@ class DiT(nn.Module):
 
         # Extract explicit coordinates (assuming first 3 channels are x,y,z)
         coords = x[..., :3] 
-        #x_features = self.x_embedder(x, mask=mask)[0] # for single transofrmer block (points:(N,P,transformer_features)) 
+        x_features = self.x_embedder(x, mask=mask)[0] # for single transofrmer block (points:(N,P,transformer_features)) 
         
-        x_features = self.x_embedder(x, mask=mask) # for twoblock point embedder PointEmbedder returns just the features
+        #x_features = self.x_embedder(x, mask=mask) # for twoblock point embedder PointEmbedder returns just the features
         
         # Add absolute position info to the features
         pos_emb = self.pos_embedder(coords)
@@ -703,10 +712,6 @@ class DiT(nn.Module):
         #NOTE Not needed for point transformer?
         #x = self.unpatchify(x)  # (N, out_channels, H, W)
         x = self.final_conv(x)  # (N, out_channels, H, W)
-        # x shape is (N, Points, C)
-        x = self.final_conv(x)
-        self.initialize_weights()
-
 
         #NOTE Zero out the padded points in the output
         if mask is not None:

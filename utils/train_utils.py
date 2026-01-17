@@ -13,6 +13,8 @@ import numpy as np
 import torch.nn.functional as F
 import awkward as ak
 from phys_plotting import plot_paper_plots
+import matplotlib.pyplot as plt
+
 
 
 def get_betas(schedule_type, b_start, b_end, time_num):

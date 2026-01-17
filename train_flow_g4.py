@@ -1,7 +1,7 @@
 import torch.multiprocessing as mp
 import torch.optim as optim
 import torch.utils.data
-from torch.cuda.amp import GradScaler, autocast
+#from torch.cuda.amp import GradScaler, autocast
 
 
 import argparse
@@ -45,7 +45,7 @@ class PVCNN2(PVCNN2Base):
             width_multiplier=width_multiplier, voxel_resolution_multiplier=voxel_resolution_multiplier
         )
 
-
+torch.autograd.set_detect_anomaly(True)
 
 @contextmanager
 def profile(enable_profiling, record_shapes=True, tensor_board=True, output_dir="profiling"):
@@ -193,14 +193,14 @@ def train(gpu, opt, output_dir, noises_init):
 
     lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
 
-    scaler = GradScaler(enabled=True)
+    #scaler = GradScaler(enabled=True)
 
     if opt.model != '':
         ckpt = torch.load(opt.model)
         model.load_state_dict(ckpt['model_state'])
         #optimizer.load_state_dict(ckpt['optimizer_state'])
-        if 'scaler_state' in ckpt: 
-            scaler.load_state_dict(ckpt['scaler_state'])
+        #if 'scaler_state' in ckpt: 
+        #    scaler.load_state_dict(ckpt['scaler_state'])
 
     if opt.model != '':
         start_epoch = torch.load(opt.model)['epoch'] + 1
@@ -273,32 +273,34 @@ def train(gpu, opt, output_dir, noises_init):
                     
                     rectified_flow.device = x.device      
                     optimizer.zero_grad()
-                    with autocast(enabled=True):
-                        x_0 = rectified_flow.sample_source_distribution(x.shape[0])
-                        if opt.model_name == "pvcnn2":
-                            x_0 = x_0.transpose(1,2)
-                        t = rectified_flow.sample_train_time(x.shape[0])
-                        t= t.squeeze()
-                        #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
-                        loss = rectified_flow.get_loss(
-                                    x_0=x_0,
-                                    x_1=x,
-                                    y= y,
-                                    gap= gap_pid,
-                                    energy=int_energy,
-                                    t=t,
-                                    mask = mask,
-                                )
-                    scaler.scale(loss).backward()
+                    #with autocast(enabled=True):
+                    x_0 = rectified_flow.sample_source_distribution(x.shape[0])
+                    if opt.model_name == "pvcnn2":
+                        x_0 = x_0.transpose(1,2)
+                    t = rectified_flow.sample_train_time(x.shape[0])
+                    t= t.squeeze()
+                    #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
+                    loss = rectified_flow.get_loss(
+                                x_0=x_0,
+                                x_1=x,
+                                y= y,
+                                gap= gap_pid,
+                                energy=int_energy,
+                                t=t,
+                                mask = mask,
+                            )
+                    #scaler.scale(loss).backward()
+                    loss.backward()
                     if hasattr(opt, 'grad_clip') and opt.grad_clip is not None:
-                        scaler.unscale_(optimizer)
+                        #scaler.unscale_(optimizer)
                         torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
                     #netpNorm, netgradNorm = getGradNorm(model)
                     #if opt.grad_clip is not None:
                     #    torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
 
-                    scaler.step(optimizer)
-                    scaler.update()
+                    #scaler.step(optimizer)
+                    optimizer.step()
+                    #scaler.update()
                     if prof is not None:
                         prof.step()
 
@@ -330,17 +332,17 @@ def train(gpu, opt, output_dir, noises_init):
                                 
                         # Sample method
                         #FIXME we should be using a validatioon small dataset instead
-                        with autocast(enabled=True):
-                            traj1 = euler_sampler.sample_loop(
-                                seed=233,
-                                y=y,
-                                gap= gap_pid,
-                                energy=int_energy,
-                                mask=mask,
-                                num_samples=num_samples,
-                                num_steps=num_steps,
-                                )
-                            pts= traj1.x_t
+                    
+                        traj1 = euler_sampler.sample_loop(
+                            seed=233,
+                            y=y,
+                            gap= gap_pid,
+                            energy=int_energy,
+                            mask=mask,
+                            num_samples=num_samples,
+                            num_steps=num_steps,
+                            )
+                        pts= traj1.x_t
                         #     trajectory = traj1.trajectories
                         # if opt.distribution_type == 'multi':
                         #     full_x = gather_all_gpu_tensors(x)
@@ -351,8 +353,8 @@ def train(gpu, opt, output_dir, noises_init):
                         #     full_x, full_pts, full_mask = x, pts, mask
                         # if gpu ==0:
                         #     torch.save([full_x, full_pts, full_mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
-                            torch.save([x, pts, mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
-                            print(f"Samples for testing save to {opt.pthsave}")
+                        torch.save([x, pts, mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
+                        print(f"Samples for testing save to {opt.pthsave}")
                         
                         with torch.no_grad():
                             plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)

@@ -136,9 +136,7 @@ class TransformerBlock(nn.Module):
         
     # xyz: b x n x in_feat = b x n x 4
     def forward(self, xyz, mask = None):
-        features = self.fc0(xyz) # features: b x n x hidden_size =(b, n, 128)
-        pre = features # Save for residual connection, (b, n, 128)
-
+        
         #dist: bxnxn = bx(n_{i,j}= square distance n_i to n_j) (why not square-root?)
         dists = square_distance(xyz, xyz)
         # Masking Distances
@@ -153,6 +151,9 @@ class TransformerBlock(nn.Module):
         knn_xyz = index_points(xyz, knn_idx) # b x n x k x in_features = bx(4 dim coordinates of k closest points to n_i)
         # in simplest words, each point n_i has attached to it is closest k neightbors
         
+        features = self.fc0(xyz) # features: b x n x hidden_size =(b, n, 128)
+        pre = features # Save for residual connection, (b, n, 128)
+
         #projection to attention dim x: bxnx 128 *linear( 128 xd_model:128)=bxnx d_model
         x = self.fc1(features) 
         # q : (x:bxnx512)*(linear(d_model:d_model,d_model)) = bxnxd_model

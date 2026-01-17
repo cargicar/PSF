@@ -191,12 +191,13 @@ class KLAnnealer:
 
 class PointCloudVAELoss(nn.Module):
     def __init__(self, lambda_e_sum=1.0, lambda_hit=1.0, 
-                 lambda_chamfer=1.0, lambda_repulsion=0.5, lambda_emd=0.0):
+                 lambda_chamfer=1.0, lambda_repulsion=1.0, lambda_emd=0.0, distance_repulsion =0.0):
         super().__init__()        
         self.lambda_e_sum = lambda_e_sum    # Global Energy conservation
         self.lambda_hit = lambda_hit        # Occupancy (BCE/Count)
         self.lambda_chamfer = lambda_chamfer # Scale for Chamfer
         self.lambda_repulsion = lambda_repulsion # Weight for Repulsion (Fixes clustering)
+        self.distance_repulsion = distance_repulsion 
         self.lambda_emd = lambda_emd        # Weight for EMD (Alternative to Chamfer)
         
     def get_repulsion_loss(self, pred_xyz, h=0.05):
@@ -224,7 +225,7 @@ class PointCloudVAELoss(nn.Module):
         # Mean over the batch and pairs
         return repulsion.mean()
 
-    def get_emd_loss(self, x, y, eps=0.005, iters=50):
+    def get_emd_loss(self, x, y, eps=0.5, iters=50):
         """
         Approximate Earth Mover's Distance using Sinkhorn iterations.
         x: [B, N, 3] (Predictions)
@@ -263,6 +264,8 @@ class PointCloudVAELoss(nn.Module):
         mu, logvar:  [B, latent_dim]
         e_init:      [B] or [B, 1]  -> Total energy condition
         """
+        m = target_mask.unsqueeze(1) # [B, 1, N]
+        m = m.transpose(1,2) # [B,Nn1]
         # Force inputs to Float
         target_mask = target_mask.float() 
         e_init = e_init.float()
@@ -278,17 +281,17 @@ class PointCloudVAELoss(nn.Module):
 
         target_xyz = target[..., :3]    # [B, N, 3]
         target_E   = target[..., 3]     # [B, N]
-
+        loss_xyz = F.mse_loss(pred_xyz * m, target_xyz * m)
         # --- 2. Repulsion Loss (NEW) ---
         # Fixes the clustering by pushing points apart
-        loss_repulsion = self.get_repulsion_loss(pred_xyz, h=0.2) * self.lambda_repulsion
+        loss_repulsion = self.get_repulsion_loss(pred_xyz, h=self.distance_repulsion) * self.lambda_repulsion
 
         # --- 3. EMD Loss (NEW/Optional) ---
         # If enabled, calculate EMD. Note: EMD is expensive.
         # We only apply it if lambda_emd > 0 to save compute.
-        loss_emd = torch.tensor(0.0, device=preds.device)
-        if self.lambda_emd > 0:
-            loss_emd = self.get_emd_loss(pred_xyz, target_xyz) * self.lambda_emd
+        #loss_emd = torch.tensor(0.0, device=preds.device)
+        #if self.lambda_emd > 0:
+        #    loss_emd = self.get_emd_loss(pred_xyz, target_xyz) * self.lambda_emd
 
         # --- 4. Masked Chamfer Distance ---
         # Pairwise squared distances: [B, N_pred, N_gt]
@@ -312,11 +315,11 @@ class PointCloudVAELoss(nn.Module):
         min_dist_target, idx_target = torch.min(dist_sq, dim=1)    # [B, N_gt]
         
         # Loss terms
-        #loss_chamfer_target = (min_dist_target * target_mask).sum() / (target_mask.sum() + 1e-6)
-        #loss_chamfer_pred   = min_dist_pred.mean()
+        loss_chamfer_target = (min_dist_target * target_mask).sum() / (target_mask.sum() + 1e-6)
+        loss_chamfer_pred   = min_dist_pred.mean()
         
         # Apply lambda_chamfer here
-        #loss_chamfer = (loss_chamfer_target + loss_chamfer_pred) * self.lambda_chamfer
+        loss_chamfer = (loss_chamfer_target + loss_chamfer_pred) * self.lambda_chamfer
 
         # --- 5. Local Energy Match ---
         batch_indices = torch.arange(batch_size, device=idx_pred.device).unsqueeze(1).expand(-1, idx_pred.shape[1])
@@ -351,19 +354,19 @@ class PointCloudVAELoss(nn.Module):
         loss_hit_weighted = self.lambda_hit * loss_hit_count
         loss_hit_entr = 0.1 * loss_hit_entropy
         
-        #total_loss = (loss_chamfer) + \
-        total_loss  = (loss_repulsion) + \
-                     (loss_emd) + \
+        total_loss = (loss_chamfer) + \
+                     (loss_xyz) + \
+                     (loss_repulsion) + \
                      (loss_local_E) + \
                      (loss_kld) + \
                      (loss_global_e) + \
                      (loss_hit_weighted) + \
-                     (loss_hit_entr)
+                     (loss_hit_entr) 
         return {
             "loss": total_loss,
-            #"chamfer": loss_chamfer.item(),
+            "chamfer": loss_chamfer.item(),
+            "xyz": loss_xyz.item(),
             "repulsion": loss_repulsion.item(), # New log
-            "emd": loss_emd.item(),             # New log
             "local_E": loss_local_E.item(),
             "global_E": loss_global_e.item(),
             "hit_count": loss_hit_weighted.item(),

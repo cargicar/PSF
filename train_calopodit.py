@@ -318,7 +318,7 @@ def train(gpu, opt, output_dir, noises_init):
                     model.eval()
                     #x = x
                     #TODO CFG has to be done here
-                    num_samples=opt.bs
+                    num_samples=opt.num_samples
                     num_steps = opt.num_steps
                     with torch.no_grad():
                         if opt.model_name == "pvcnn2":
@@ -332,32 +332,32 @@ def train(gpu, opt, output_dir, noises_init):
                                 
                         # Sample method
                         #FIXME we should be using a validatioon small dataset instead
-                    
-                        traj1 = euler_sampler.sample_loop(
-                            seed=233,
-                            y=y,
-                            gap= gap_pid,
-                            energy=int_energy,
-                            mask=mask,
-                            num_samples=num_samples,
-                            num_steps=num_steps,
-                            )
-                        pts= traj1.x_t
-                        #     trajectory = traj1.trajectories
-                        # if opt.distribution_type == 'multi':
-                        #     full_x = gather_all_gpu_tensors(x)
-                        #     full_pts = gather_all_gpu_tensors(pts)
-                        #     full_mask = gather_all_gpu_tensors(mask)
-                        # else:
-                        #     # Fallback for single GPU training
-                        #     full_x, full_pts, full_mask = x, pts, mask
-                        # if gpu ==0:
-                        #     torch.save([full_x, full_pts, full_mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
-                        torch.save([x, pts, mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
-                        print(f"Samples for testing save to {opt.pthsave}")
-                        
-                        with torch.no_grad():
-                            plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
+                        if gpu == 0:
+                            traj1 = euler_sampler.sample_loop(
+                                seed=233,
+                                y=y,
+                                gap= gap_pid,
+                                energy=int_energy,
+                                mask=mask,
+                                num_samples=num_samples,
+                                num_steps=num_steps,
+                                )
+                            pts= traj1.x_t
+                            #     trajectory = traj1.trajectories
+                            # if opt.distribution_type == 'multi':
+                            #     full_x = gather_all_gpu_tensors(x)
+                            #     full_pts = gather_all_gpu_tensors(pts)
+                            #     full_mask = gather_all_gpu_tensors(mask)
+                            # else:
+                            #     # Fallback for single GPU training
+                            #     full_x, full_pts, full_mask = x, pts, mask
+                            # if gpu ==0:
+                            #     torch.save([full_x, full_pts, full_mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
+                            torch.save([x, pts, mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
+                            print(f"Samples for testing save to {opt.pthsave}")
+                            
+                        #with torch.no_grad():
+                        #    plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
                     # if debug:
                     #     visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
                     #                             trajectory, None, None,
@@ -439,7 +439,7 @@ def parse_args():
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=52, help='input batch size')
+    parser.add_argument('--bs', type=int, default=256, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
@@ -461,9 +461,10 @@ def parse_args():
     parser.add_argument("--train_time_distribution", type=str, default="uniform", help="Distribution of the training time samples. Choose between ['uniform', 'lognormal', 'u_shaped'].")
     parser.add_argument("--train_time_weight", type=str, default="uniform", help="Weighting of the training time samples. Choose between ['uniform'].")
     parser.add_argument("--criterion", type=str, default="mse", help="Criterion for the rectified flow. Choose between ['mse', 'l1', 'lpips'].")
-    parser.add_argument("--num_steps", type=int, default=1000, help=(
+    parser.add_argument("--num_steps", type=int, default=100, help=(
             "Number of steps for generation. Used in training Reflow and/or evaluation"),)
-    parser.add_argument("--sample_batch_size", type=int, default=100, help="Batch size (per device) for sampling images.",)
+    #parser.add_argument("--sample_batch_size", type=int, default=100, help="Batch size (per device) for sampling images.",)
+    parser.add_argument("--num_samples", type=int, default=100, help="Batch size (per device) for sampling images.",)
 
     #params
     parser.add_argument('--attention', default=True)
@@ -502,7 +503,7 @@ def parse_args():
     '''eval'''
     parser.add_argument('--saveIter', type=int, default=8, help='unit: epoch')
     parser.add_argument('--diagIter', type=int, default=8, help='unit: epoch')
-    parser.add_argument('--vizIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--vizIter', type=int, default=80, help='unit: epoch')
     parser.add_argument('--print_freq', type=int, default=8, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')

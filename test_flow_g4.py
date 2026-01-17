@@ -761,7 +761,7 @@ s=0.0: Purely unconditional (ignores your energy/label inputs)."""
 def generate(model, opt):
 
     ''' data '''
-    def pad_collate_fn(batch, max_particles=1000):
+    def pad_collate_fn(batch, max_particles=1700):
         """
         Custom collate function to handle batches of showers with varying numbers of particles.
         It pads or truncates each shower to a fixed size and then stacks them.
@@ -893,20 +893,20 @@ def generate(model, opt):
             # gen = gen.transpose(1,2)
             # x = x.transpose(1,2).contiguous()
 
-            gen = gen * s + m
-            x = x * s + m
+            #gen = gen * s + m
+            #x = x * s + m
             samples.append(gen)
             ref.append(x)
-            torch.save(samples, f'Jan_02_photon_samples_{i}.pth')
+            savepath = "/pscratch/sd/c/ccardona/datasets/pth/"
+            torch.save([samples, ref, mask], f'Jan_02_photon_samples_{i}.pth')
             #exit(0)
-            visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), 'x.png'), gen[:64], None,
-                                       None, None)
+            #visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), 'x.png'), gen[:64], None, None, None)
 
-        samples = torch.cat(samples, dim=0)
-        torch.save(samples, 'appendix_distill_samples_{}_{}.pth'.format(opt.category, opt.num_steps))
-        ref = torch.cat(ref, dim=0)
+        # samples = torch.cat(samples, dim=0)
+        # torch.save(samples, 'appendix_distill_samples_{}_{}.pth'.format(opt.category, opt.num_steps))
+        # ref = torch.cat(ref, dim=0)
 
-        torch.save(samples, opt.eval_path)
+        # torch.save(samples, opt.eval_path)
 
 
 
@@ -1014,7 +1014,7 @@ def parse_args():
     
     
     '''model'''
-    parser.add_argument("--model_name", type=str, default="pvcnn2", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
+    parser.add_argument("--model_name", type=str, default="calopodit", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
     parser.add_argument('--beta_start', default=0.0001)
     parser.add_argument('--beta_end', default=0.02)
     parser.add_argument('--schedule_type', default='linear')

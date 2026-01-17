@@ -154,7 +154,7 @@ def test(gpu, opt, output_dir, noises_init):
     #Rectified_Flow
     #rf_criterion = RectifiedFlowLossFunction(loss_type = "mse")
     rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 0.1)
-    rf_criterion = "mse"
+    #rf_criterion = "mse"
 
     data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
     rectified_flow = RectifiedFlow(
@@ -180,7 +180,9 @@ def test(gpu, opt, output_dir, noises_init):
     model.eval()
     with torch.no_grad():
         for i, data in enumerate(dataloader):
-            if i > 2:
+            if i <= 2:
+                continue
+            if i > 20:
                 break
             if opt.dataname == 'g4' or opt.dataname == 'idl':
                 x, mask, int_energy, y, gap_pid, idx = data
@@ -244,8 +246,9 @@ def test(gpu, opt, output_dir, noises_init):
                 recons.append(pts)
                 masks.append(mask)
                 print(f"Generating batch {i}")
+                torch.save([x, pts, mask], f'{opt.pthsave}_calopodit_gen_Jan_17_batch_{i}.pth')  
                 with torch.no_grad():
-                        plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
+                        plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{opt.pthsave}/reconstruction_batch_{i}.png", index=0)
                 # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
                 #                         trajectory, None, None,
                 #                         None)
@@ -266,7 +269,7 @@ def test(gpu, opt, output_dir, noises_init):
         recons = torch.cat(recons, 0)
         masks = torch.cat(masks, 0)
         
-        torch.save([xs, recons, masks], f'{opt.pthsave}_calopodit_gen_Jan_14_m.pth')  
+        torch.save([xs, recons, masks], f'{opt.pthsave}_calopodit_gen_Jan_17_m.pth')  
         print(f"Plot save to {opt.pthsave}")
     
         dist.destroy_process_group()

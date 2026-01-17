@@ -2,7 +2,7 @@ import torch
 import os
 from pathlib import Path
 
-def combine_pth_files(input_dir, output_filename, pattern="*photon_samples_*.pth"):
+def combine_pth_files(input_dir, output_filename, pattern="*_calopodit_gen_Jan_17_batch*.pth"):
     input_path = Path(input_dir)
     
     # 1. Filter and sort files (sorting ensures samples_1 comes before samples_2)
@@ -16,29 +16,31 @@ def combine_pth_files(input_dir, output_filename, pattern="*photon_samples_*.pth
     print(f"Found {len(files)} files. Loading...")
 
     # 2. Load all files into a list
-    loaded_data = []
+    xs = []
+    gens = []
+    masks = []
     for f in files:
-        data = torch.load(f)
-        if isinstance(data, list):
-            # If it's a list, extend our main list with its elements
-            loaded_data.extend(data)
-        else:
-            # If it's already a tensor, just add it
-            loaded_data.append(data)
+        #data = torch.load(f)
+        x, gen, mask = torch.load(f, map_location='cpu')
+        xs.append(x)
+        gens.append(gen)
+        masks.append(mask)
     
-    # 3. Concatenate data
+    # Concatenate data
     # Note: dim=0 assumes you want to stack them along the first dimension
-    combined_data = torch.cat(loaded_data, dim=0)
+    xs = torch.cat(xs, dim=0)
+    gens = torch.cat(gens, dim=0)
+    masks = torch.cat(masks, dim=0)
     
     # 4. Save the result
-    torch.save(combined_data, output_filename)
+    torch.save([xs, gens, masks], output_filename)
     print(f"Successfully saved concatenated tensor to {output_filename}")
-    print(f"Final shape: {combined_data.shape}")
+    print(f"Final shape: {xs.shape}")
 
 # Usage
 if __name__ == "__main__":
     # Update these paths to match your setup
-    target_directory = "./" 
-    output_file = "combined_photon_samples.pth"
+    target_directory = "/pscratch/sd/c/ccardona/datasets/pth" 
+    output_file = f"/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Jan_17.pth"
     
     combine_pth_files(target_directory, output_file)

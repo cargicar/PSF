@@ -266,7 +266,11 @@ class EnergyEmbedder(nn.Module):
                 drop_ids = force_drop_ids.bool()
 
             # Broadcast the null embedding to the samples marked for dropout
-            null_broadcast = self.null_embedding.expand(B, self.hidden_size)
+            #null_broadcast = self.null_embedding.expand(B, self.hidden_size)
+            null_emb_cast = self.null_embedding.to(dtype=embeddings.dtype) # due to autocast
+            
+            # Now expand
+            null_broadcast = null_emb_cast.expand(B, self.hidden_size)
             
             # Replace the generated embeddings with the null embedding
             embeddings[drop_ids] = null_broadcast[drop_ids]
@@ -308,7 +312,7 @@ class PointEmbedder(nn.Module):
         # Input: (B, N, 4) -> Output: (B, N, 256)
         self.blocks.append(TransformerBlock(
             in_features=config.in_features,          # 4
-            transformer_features=  config.hidden_size,#intermediate_dim, # # 64 (Bottleneck dim)
+            transformer_features= intermediate_dim, # # 64 (Bottleneck dim)
             d_model=config.hidden_size,              # 128
             k=config.k                               # 8
         ))
@@ -320,7 +324,7 @@ class PointEmbedder(nn.Module):
         # We generally want the internal dim to be closer to the d_model in deeper layers.
         
         self.blocks.append(TransformerBlock(
-            in_features=config.hidden_size,      # 64 (Input from Block 1)
+            in_features=intermediate_dim, #config.hidden_size,      # 64 (Input from Block 1)
             transformer_features=config.hidden_size, 
             d_model=config.hidden_size,              # 128 (Maintains size)
             k=config.k
@@ -452,14 +456,14 @@ class DiT(nn.Module):
         #NOTE point transformer replaced PatchEmbed
         # AKA Tokenizer
         # Single Transformer Block
-        self.x_embedder = TransformerBlock(
-            config.in_features,
-            config.hidden_size,#config.transformer_features,
-            config.hidden_size,
-            config.k,
-            )
+        # self.x_embedder = TransformerBlock(
+        #     config.in_features,
+        #     config.hidden_size,#config.transformer_features,
+        #     config.hidden_size,
+        #     config.k,
+        #     )
         # Two blocks for improved complex geometric extraction
-        #self.x_embedder = PointEmbedder(config)
+        self.x_embedder = PointEmbedder(config)
 
         #NOTE  EdgeConvBlock replaced point transformer
         # self.x_embedder = EdgeConvBlock(
@@ -655,16 +659,14 @@ class DiT(nn.Module):
 
         # Extract explicit coordinates (assuming first 3 channels are x,y,z)
         coords = x[..., :3] 
-        x_features = self.x_embedder(x, mask=mask)[0] # for single transofrmer block (points:(N,P,transformer_features)) 
+        #x_features = self.x_embedder(x, mask=mask)[0] # for single transofrmer block (points:(N,P,transformer_features)) 
         
-        #x_features = self.x_embedder(x, mask=mask) # for twoblock point embedder PointEmbedder returns just the features
+        x_features = self.x_embedder(x, mask=mask) # for twoblock point embedder PointEmbedder returns just the features
         
         # Add absolute position info to the features
         pos_emb = self.pos_embedder(coords)
         x = x_features + pos_emb 
 
-
-        x= self.x_embedder(x, mask = mask)
         #t = self.t_embedder(t)  # (N, D)
         c = self.t_embedder(t)  # c is (N, D)
         #Sequentially add other embeddings to 'c'

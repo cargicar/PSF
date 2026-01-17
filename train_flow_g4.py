@@ -289,7 +289,7 @@ def train(gpu, opt, output_dir, noises_init):
                                     t=t,
                                     mask = mask,
                                 )
-                    scaler.scale.loss.backward()
+                    scaler.scale(loss).backward()
                     if hasattr(opt, 'grad_clip') and opt.grad_clip is not None:
                         scaler.unscale_(optimizer)
                         torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
@@ -436,7 +436,7 @@ def parse_args():
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=32, help='input batch size')
+    parser.add_argument('--bs', type=int, default=128, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)

@@ -341,17 +341,18 @@ def train(gpu, opt, output_dir, noises_init):
                                 num_steps=num_steps,
                                 )
                             pts= traj1.x_t
-                            trajectory = traj1.trajectories
-                        if opt.distribution_type == 'multi':
-                            full_x = gather_all_gpu_tensors(x)
-                            full_pts = gather_all_gpu_tensors(pts)
-                            full_mask = gather_all_gpu_tensors(mask)
-                        else:
-                            # Fallback for single GPU training
-                            full_x, full_pts, full_mask = x, pts, mask
-                        if gpu ==0:
-                            torch.save([full_x, full_pts, full_mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
-                            print(f"Samples fir testing save to {opt.pthsave}")
+                        #     trajectory = traj1.trajectories
+                        # if opt.distribution_type == 'multi':
+                        #     full_x = gather_all_gpu_tensors(x)
+                        #     full_pts = gather_all_gpu_tensors(pts)
+                        #     full_mask = gather_all_gpu_tensors(mask)
+                        # else:
+                        #     # Fallback for single GPU training
+                        #     full_x, full_pts, full_mask = x, pts, mask
+                        # if gpu ==0:
+                        #     torch.save([full_x, full_pts, full_mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
+                            torch.save([x, pts, mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
+                            print(f"Samples for testing save to {opt.pthsave}")
                         
                         with torch.no_grad():
                             plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
@@ -436,7 +437,7 @@ def parse_args():
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=128, help='input batch size')
+    parser.add_argument('--bs', type=int, default=52, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)

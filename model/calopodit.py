@@ -485,6 +485,7 @@ class DiT(nn.Module):
         self.pos_embedder = SineSpatialEmbedder(config.hidden_size)
         
         self.t_embedder = TimestepEmbedder(config.hidden_size)
+
         if config.num_classes > 0:  # conditional generation on particle labels
             self.y_embedder = LabelEmbedder(
                 config.num_classes, config.hidden_size, config.class_dropout_prob
@@ -497,12 +498,28 @@ class DiT(nn.Module):
             self.e_embedder = EnergyEmbedder(
                 config.hidden_size, config.class_dropout_prob
             )
-        #FIXME initially not post emmbedding. Still need to figure out the equivalent in point transformer
-        #num_patches = self.x_embedder.num_centroids
-        # Will use fixed sin-cos embedding:
-        #self.pos_embed = nn.Parameter(
-        #    torch.zeros(1, num_patches, config.hidden_size), requires_grad=False
-        #)
+        
+        #NOTE concatenated conditionals
+        cond_dim = config.hidden_size 
+
+        if config.num_classes > 0:
+            cond_dim += config.hidden_size
+        if config.gap_classes > 0:
+            cond_dim += config.hidden_size
+        if config.energy_cond:
+            cond_dim += config.hidden_size
+
+        # If we have more than just time, we need a fuser
+        if cond_dim > config.hidden_size:
+            self.condition_fuser = nn.Sequential(
+                nn.Linear(cond_dim, config.hidden_size),
+                nn.SiLU(),
+                nn.Linear(config.hidden_size, config.hidden_size)
+            )
+        else:
+            self.condition_fuser = nn.Identity()
+
+
         self.in_blocks = nn.ModuleList(
             [
                 DiTBlock(
@@ -585,6 +602,12 @@ class DiT(nn.Module):
                         nn.init.zeros_(layer.bias)              
             # Initialize null embedding parameter
             nn.init.normal_(self.e_embedder.null_embedding, std=0.02)
+        # Initialize conditional fuser weights closer to identity to not break training stability start
+        if isinstance(self.condition_fuser, nn.Sequential):
+            nn.init.xavier_uniform_(self.condition_fuser[0].weight)
+            nn.init.zeros_(self.condition_fuser[0].bias)
+            nn.init.zeros_(self.condition_fuser[2].weight) # Output zero init usually helps DiT
+            nn.init.zeros_(self.condition_fuser[2].bias)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
@@ -677,22 +700,27 @@ class DiT(nn.Module):
         x = x_features + pos_emb 
 
         #t = self.t_embedder(t)  # (N, D)
-        c = self.t_embedder(t)  # c is (N, D)
-        #Sequentially add other embeddings to 'c'
+        t_emb = self.t_embedder(t)  # c is (N, D)
+        cond_list= [t_emb]
+        # Collect all conditional embeddings
         if hasattr(self, "y_embedder"):
-            y_emb = self.y_embedder(y, self.training, force_drop_ids=force_drop_ids)  # (N, D)
-            # Add the y embedding to the conditional vector 'c'
-            c = c + y_emb
+            y_emb = self.y_embedder(y, self.training, force_drop_ids=force_drop_ids)
+            cond_list.append(y_emb)
+
         if hasattr(self, "gap_embedder"):
-            gap_emb = self.gap_embedder(gap, self.training, force_drop_ids=force_drop_ids)  # (N, D)
-            # Add the gap embedding to the conditional vector 'c'
-            c = c + gap_emb
+            gap_emb = self.gap_embedder(gap, self.training, force_drop_ids=force_drop_ids)
+            cond_list.append(gap_emb)
 
         if hasattr(self, "e_embedder"):
-            energy_emb = self.e_embedder(energy, self.training, force_drop_ids=force_drop_ids)  # (N, D)
-            # Add the energy embedding conditional vector 'c'
-            c = c + energy_emb
-        
+            energy_emb = self.e_embedder(energy, self.training, force_drop_ids=force_drop_ids)
+            cond_list.append(energy_emb)
+
+        # Concatenate (along feature dim)
+        # Shape becomes (N, hidden_size * num_conditions)
+        c_concat = torch.cat(cond_list, dim=-1) 
+
+        #  Fuse back to (N, hidden_size)
+        c = self.condition_fuser(c_concat)
         #'c' contains t + y (+ gap) (+ energy) 
         skips = []
         for idx, block in enumerate(self.in_blocks):

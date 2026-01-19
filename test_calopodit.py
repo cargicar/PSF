@@ -228,7 +228,9 @@ def test(gpu, opt, output_dir, noises_init):
                     euler_sampler = MyEulerSampler(
                             rectified_flow=rectified_flow,
                         )
-                        
+                # CFG Scale (Usually 2.0 to 7.0 for diffusion/flow)
+                # 1.0 = No guidance (standard), 4.0 = Strong guidance
+                cfg_scale = 4.0
                 # Sample method
                 #FIXME we should be using a validatioon small dataset instead
                 traj1 = euler_sampler.sample_loop(
@@ -239,6 +241,7 @@ def test(gpu, opt, output_dir, noises_init):
                     mask=mask,
                     num_samples=num_samples,
                     num_steps=num_steps,
+                    cfg_scale=cfg_scale,
                     )
                 pts= traj1.x_t
                 trajectory = traj1.trajectories

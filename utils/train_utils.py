@@ -179,6 +179,23 @@ class MyEulerSamplerPVCNN(Sampler):
         self.x_t = self.x_t + (t_next - t) * v_t
 
 
+# class MyEulerSampler(Sampler):
+#     def __init__(self, **kwargs):
+#         super().__init__(**kwargs)
+
+#     def step(self, **model_kwargs):
+#         # Extract the current time, next time point, and current state
+#         t, t_next, x_t = self.t, self.t_next, self.x_t
+#         # Compute the velocity field at the current state and time
+#         v_t = self.rectified_flow.get_velocity(x_t=x_t, t=t, **model_kwargs)
+#         # Update the state using the Euler formula
+#         self.x_t = self.x_t + (t_next - t) * v_t     
+
+#         # in self.x_t to stay at 0 so they don't drift during sampling
+#         if "mask" in model_kwargs and model_kwargs["mask"] is not None:
+#             mask = model_kwargs["mask"].unsqueeze(-1).to(self.x_t.device)
+#             self.x_t = self.x_t * mask
+
 class MyEulerSampler(Sampler):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -186,13 +203,38 @@ class MyEulerSampler(Sampler):
     def step(self, **model_kwargs):
         # Extract the current time, next time point, and current state
         t, t_next, x_t = self.t, self.t_next, self.x_t
-        # Compute the velocity field at the current state and time
-        v_t = self.rectified_flow.get_velocity(x_t=x_t, t=t, **model_kwargs)
-        # Update the state using the Euler formula
+        
+        # 1. Extract CFG Scale (default to 1.0 if not provided)
+        cfg_scale = model_kwargs.get("cfg_scale", 1.0)
+        
+        # 2. Branching Logic
+        if cfg_scale > 1.0:
+            # --- CFG PATH ---
+            # We bypass rectified_flow.get_velocity to call the model directly.
+            # This allows us to leverage the 'forward_with_cfg' method you added to DiT.
+            
+            # Critical: 't' in the loop is a float, but the model expects a Tensor (N,)
+            batch_size = x_t.shape[0]
+            t_tensor = torch.full((batch_size,), t, device=x_t.device, dtype=torch.float32)
+            
+            # Access the underlying DiT model (velocity_field) directly
+            v_t = self.rectified_flow.velocity_field.forward_with_cfg(
+                x=x_t,
+                t=t_tensor,
+                cfg_scale=cfg_scale,
+                **model_kwargs # Unpacks y, gap, energy, mask automatically
+            )
+        else:
+            # --- STANDARD PATH ---
+            # Use the standard wrapper for normal inference
+            v_t = self.rectified_flow.get_velocity(x_t=x_t, t=t, **model_kwargs)
+            
+        # 3. Update the state using the Euler formula
         self.x_t = self.x_t + (t_next - t) * v_t     
 
-        # in self.x_t to stay at 0 so they don't drift during sampling
+        # 4. Masking (Zero out padded points)
         if "mask" in model_kwargs and model_kwargs["mask"] is not None:
+            # Ensure mask is broadcastable (B, N, 1)
             mask = model_kwargs["mask"].unsqueeze(-1).to(self.x_t.device)
             self.x_t = self.x_t * mask
 

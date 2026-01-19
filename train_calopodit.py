@@ -10,7 +10,6 @@ from torch.distributions import Normal
 from utils.file_utils import *
 from utils.visualize import *
 from utils.train_utils import *
-from model.pvcnn_generation import PVCNN2Base
 from model.calopodit import DiT, DiTConfig
 import torch.distributed as dist
 
@@ -22,30 +21,7 @@ from contextlib import contextmanager
 import torch.profiler
 from functools import partial
 
-
-class PVCNN2(PVCNN2Base):
-    sa_blocks = [
-        ((32, 2, 32), (1024, 0.1, 32, (32, 64))),
-        ((64, 3, 16), (256, 0.2, 32, (64, 128))),
-        ((128, 3, 8), (64, 0.4, 32, (128, 256))),
-        (None, (16, 0.8, 32, (256, 256, 512))),
-    ]
-    fp_blocks = [
-        ((256, 256), (256, 3, 8)),
-        ((256, 256), (256, 3, 8)),
-        ((256, 128), (128, 2, 16)),
-        ((128, 128, 64), (64, 2, 32)),
-    ]
-
-    def __init__(self, num_classes, embed_dim, use_att,dropout, extra_feature_channels=3, width_multiplier=1,
-                 voxel_resolution_multiplier=1):
-        super().__init__(
-            num_classes=num_classes, embed_dim=embed_dim, use_att=use_att,
-            dropout=dropout, extra_feature_channels=extra_feature_channels,
-            width_multiplier=width_multiplier, voxel_resolution_multiplier=voxel_resolution_multiplier
-        )
-
-torch.autograd.set_detect_anomaly(True)
+#torch.autograd.set_detect_anomaly(True)
 
 @contextmanager
 def profile(enable_profiling, record_shapes=True, tensor_board=True, output_dir="profiling"):
@@ -131,14 +107,7 @@ def train(gpu, opt, output_dir, noises_init):
     '''
     #betas = get_betas(opt.schedule_type, opt.beta_start, opt.beta_end, opt.time_num)
     #model = Model(opt, betas, opt.loss_type, opt.model_mean_type, opt.model_var_type)
-
-    if opt.model_name == 'pvcnn2':
-        model = PVCNN2(num_classes=opt.nc, 
-                    embed_dim=opt.embed_dim, 
-                    use_att=opt.attention,
-                    dropout=opt.dropout, 
-                    extra_feature_channels=1) #<--- energy. #NOTE maybe we can add the remaining features as extra channels?? 
-    elif opt.model_name == 'calopodit':
+    if opt.model_name == 'calopodit':
         #TODO clean up this config. Delet unused params and add new useful ones.
         DiT_config = DiTConfig(
             #Point transformer config
@@ -160,6 +129,8 @@ def train(gpu, opt, output_dir, noises_init):
             use_long_skip=True,
             final_conv=False,
         )
+    else:
+        print(f"Model {opt.model_name} not implemented or not included in this script")
         model = DiT(DiT_config)
     
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
@@ -212,6 +183,7 @@ def train(gpu, opt, output_dir, noises_init):
     #Rectified_Flow
     #rf_criterion = RectifiedFlowLossFunction(loss_type = "mse")
     rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 0.1)
+    p_drop = opt.dropout
     
     data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
     rectified_flow = RectifiedFlow(
@@ -241,6 +213,8 @@ def train(gpu, opt, output_dir, noises_init):
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         x, mask, int_energy, y, gap_pid, idx = data
+                        gap_pid = gap_pid.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
+                        y = y.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
                         
                         # x_pc = x[:,:,:3]
                         # outf_syn = f"/global/homes/c/ccardona/PSF"
@@ -279,6 +253,13 @@ def train(gpu, opt, output_dir, noises_init):
                         x_0 = x_0.transpose(1,2)
                     t = rectified_flow.sample_train_time(x.shape[0])
                     t= t.squeeze()
+
+                    #CFG
+                    batch_size = x.shape[0]
+                    if p_drop > 0:
+                        force_drop_ids = torch.bernoulli(torch.full((batch_size,), p_drop, device=x.device)).bool()
+                    else:
+                        force_drop_ids = None
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
                     loss = rectified_flow.get_loss(
                                 x_0=x_0,
@@ -288,6 +269,7 @@ def train(gpu, opt, output_dir, noises_init):
                                 energy=int_energy,
                                 t=t,
                                 mask = mask,
+                                force_drop_ids = force_drop_ids
                             )
                     #scaler.scale(loss).backward()
                     loss.backward()
@@ -433,8 +415,8 @@ def parse_args():
     ''' Data '''
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
-    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
+    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/')
     parser.add_argument('--category', default='all', help='category of dataset')
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
@@ -443,9 +425,9 @@ def parse_args():
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
-    parser.add_argument('--npoints',  type=int, default=2048)
+    parser.add_argument('--npoints',  type=int, default=1700)
     parser.add_argument("--num_classes", type=int, default=0, help=("Number of primary particles used in simulated data"),)
-    parser.add_argument("--gap_classes", type=int, default=0, help=("Number of calorimeter materials used in simulated data"),)
+    parser.add_argument("--gap_classes", type=int, default=2, help=("Number of calorimeter materials used in simulated data"),)
     
     '''model'''
     parser.add_argument("--model_name", type=str, default="calopodit", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")

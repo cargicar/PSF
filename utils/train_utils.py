@@ -218,10 +218,12 @@ class MyEulerSampler(Sampler):
             t_tensor = torch.full((batch_size,), t, device=x_t.device, dtype=torch.float32)
             
             # Access the underlying DiT model (velocity_field) directly
+            if hasattr(self.rectified_flow.velocity_field, 'module'):
+                self.rectified_flow.velocity_field = self.rectified_flow.velocity_field.module
             v_t = self.rectified_flow.velocity_field.forward_with_cfg(
                 x=x_t,
                 t=t_tensor,
-                cfg_scale=cfg_scale,
+                #cfg_scale=cfg_scale,
                 **model_kwargs # Unpacks y, gap, energy, mask automatically
             )
         else:

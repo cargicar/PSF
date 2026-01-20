@@ -52,6 +52,40 @@ def profiler_table_output(prof, output_filename="profiling/cuda_memory_profile.t
 
     print(f"Profiler table saved to {output_filename}")
 
+def gather_distributed_tensor(tensor):
+    """
+    Gathers a tensor from all distributed processes to all processes.
+    Handles variable batch sizes across processes.
+    """
+    if not torch.distributed.is_initialized():
+        return tensor
+
+    # 1. Gather the size of the tensor from each process
+    local_size = torch.tensor([tensor.shape[0]], device=tensor.device)
+    all_sizes = [torch.zeros_like(local_size) for _ in range(torch.distributed.get_world_size())]
+    torch.distributed.all_gather(all_sizes, local_size)
+    max_size = max(s.item() for s in all_sizes)
+
+    # 2. Pad tensor if it's smaller than the max size (all_gather requires identical shapes)
+    if local_size.item() < max_size:
+        padding = torch.zeros((max_size - local_size.item(), *tensor.shape[1:]), 
+                              device=tensor.device, dtype=tensor.dtype)
+        padded_tensor = torch.cat([tensor, padding], dim=0)
+    else:
+        padded_tensor = tensor
+
+    # 3. Gather the padded tensors
+    gathered_list = [torch.zeros_like(padded_tensor) for _ in range(torch.distributed.get_world_size())]
+    torch.distributed.all_gather(gathered_list, padded_tensor)
+
+    # 4. Remove padding based on the recorded sizes
+    clean_list = []
+    for i, size in enumerate(all_sizes):
+        clean_list.append(gathered_list[i][:size.item()])
+    
+    # 5. Concatenate
+    return torch.cat(clean_list, dim=0)
+
 def test(gpu, opt, output_dir, noises_init):
     debug = False
     set_seed(opt)
@@ -177,11 +211,10 @@ def test(gpu, opt, output_dir, noises_init):
     masks =[]
     xs = []
     recons = []
+    gaps = []
     model.eval()
     with torch.no_grad():
         for i, data in enumerate(dataloader):
-            if i <= 2:
-                continue
             if i > 20:
                 break
             if opt.dataname == 'g4' or opt.dataname == 'idl':
@@ -245,13 +278,15 @@ def test(gpu, opt, output_dir, noises_init):
                     )
                 pts= traj1.x_t
                 trajectory = traj1.trajectories
+                print(f"Rang {gpu}: Generating batch {i}")
                 xs.append(x)
                 recons.append(pts)
                 masks.append(mask)
-                print(f"Generating batch {i}")
-                torch.save([x, pts, mask], f'{opt.pthsave}_calopodit_gen_Jan_17_batch_{i}.pth')  
-                with torch.no_grad():
-                        plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{opt.pthsave}/reconstruction_batch_{i}.png", index=0)
+                gaps.append(gap_pid)
+                
+                #torch.save([x, pts, mask, gap_pid], f'{opt.pthsave}_calopodit_gen_Jan_20_batch_{i}.pth')  
+                #with torch.no_grad():
+                #        plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{opt.pthsave}/reconstruction_batch_{i}.png", index=0)
                 # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
                 #                         trajectory, None, None,
                 #                         None)
@@ -271,11 +306,33 @@ def test(gpu, opt, output_dir, noises_init):
         xs = torch.cat(xs, 0)
         recons = torch.cat(recons, 0)
         masks = torch.cat(masks, 0)
-        
-        torch.save([xs, recons, masks], f'{opt.pthsave}_calopodit_gen_Jan_17_m.pth')  
-        print(f"Plot save to {opt.pthsave}")
-    
-        dist.destroy_process_group()
+        gaps = torch.cat(gaps, 0)
+        #  Gather from all GPUs
+        if opt.distribution_type == 'multi':
+            # Use the helper function defined above
+            final_xs = gather_distributed_tensor(xs)
+            final_recons = gather_distributed_tensor(recons)
+            final_masks = gather_distributed_tensor(masks)
+            final_gaps = gather_distributed_tensor(gaps)
+        else:
+            final_xs, final_recons, final_masks, final_gaps = xs, recons, masks, gaps
+        if gpu == 0:
+            save_path = f'{opt.pthsave}_calopodit_gen_Jan_20_FULL.pth'
+            torch.save([final_xs.cpu(), final_recons.cpu(), final_masks.cpu(), final_gaps.cpu()], save_path)  
+            print(f"Full dataset saved to {save_path}")
+            
+            # Plotting (only needs to be done on master)
+            # Note: plot_4d_reconstruction might need CPU tensors
+            plot_4d_reconstruction(
+                final_xs[:10].transpose(1,2), 
+                final_recons[:10].transpose(1,2), 
+                savepath=f"{opt.pthsave}/reconstruction_final.png", 
+                index=0
+            )
+
+        if opt.distribution_type == 'multi':
+            dist.barrier()
+            dist.destroy_process_group()
 
 def main():
     opt = parse_args()
@@ -317,13 +374,13 @@ def parse_args():
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=256, help='input batch size')
+    parser.add_argument('--bs', type=int, default=128, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)
     parser.add_argument("--num_classes", type=int, default=0, help=("Number of primary particles used in simulated data"),)
-    parser.add_argument("--gap_classes", type=int, default=0, help=("Number of calorimeter materials used in simulated data"),)
+    parser.add_argument("--gap_classes", type=int, default=2, help=("Number of calorimeter materials used in simulated data"),)
     
     '''model'''
     parser.add_argument("--model_name", type=str, default="calopodit", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")

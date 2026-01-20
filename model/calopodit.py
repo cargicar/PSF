@@ -758,6 +758,9 @@ class DiT(nn.Module):
         # (Optional: You can do two separate passes if memory is tight)
         combined_x = torch.cat([x, x], dim=0)
         combined_t = torch.cat([t, t], dim=0)
+        combined_y = torch.cat([y, y], dim=0) if y is not None else None
+        combined_gap = torch.cat([gap, gap], dim=0) if gap is not None else None
+        combined_energy = torch.cat([energy, energy], dim=0) if energy is not None else None
         combined_mask = torch.cat([mask, mask], dim=0) if mask is not None else None
         
         # 2. Create "Null" conditions for the second half of the batch
@@ -769,7 +772,7 @@ class DiT(nn.Module):
         # 3. Pass through the model
         # Note: Modify your forward() to pass force_drop_ids to the embedders
         model_out = self.forward(
-            combined_x, combined_t, y, gap, energy, 
+            combined_x, combined_t, combined_y, combined_gap, combined_energy, 
             mask=combined_mask, force_drop_ids=force_drop
         )
         

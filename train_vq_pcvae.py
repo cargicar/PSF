@@ -13,7 +13,8 @@ from utils.train_utils import *
 """import models"""
 #from model.pvcnn_generation import PVCNN2Base
 #from model.calopodit import DiT, DiTConfig
-from models.PCVAE import PointCloud4DVAE, PointCloudVAELoss, KLAnnealer
+#from models.PCVAE import PointCloud4DVAE, PointCloudVAELoss, KLAnnealer
+from models.PC4DVQVAE import PointCloud4DVQVAE, PointCloudVQVAELoss
 import torch.distributed as dist
 
 
@@ -155,8 +156,8 @@ def train(gpu, opt, output_dir, noises_init):
     '''
     #betas = get_betas(opt.schedule_type, opt.beta_start, opt.beta_end, opt.time_num)
     #model = Model(opt, betas, opt.loss_type, opt.model_mean_type, opt.model_var_type)
-    if opt.model_name == 'pc4dvae':
-        model = PointCloud4DVAE(latent_dim=opt.latent_dim, max_points=train_dataset.max_particles)
+    if opt.model_name == 'pc4dvqvae':
+        model = PointCloud4DVQVAE(latent_dim=opt.latent_dim, max_points=train_dataset.max_particles)
     else:
         print(f"Model name {opt.model_name} not implemented.")
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
@@ -187,18 +188,18 @@ def train(gpu, opt, output_dir, noises_init):
         logger.info(opt)
 
     optimizer= optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
-    criterion = PointCloudVAELoss(
-            lambda_e_sum=0.0001, 
-            lambda_hit=0.000001,
-            lambda_chamfer=0.5,
-            distance_repulsion = 0.2,
-            lambda_repulsion=0.5,
+    # criterion = PointCloudVQVAELoss(
+    #         lambda_e_sum=0.0, 
+    #         lambda_hit=0.0,
+    #         lambda_chamfer=0.0,
+    #         lambda_vq=1.0,
+    # )
+    criterion = PointCloudVQVAELoss(
+            factor_vq=0.1, 
+            factor_hit = 0.0,
     )
     lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
-    # This will reach 0.005 by epoch 30
-    annealer = KLAnnealer(target_kl=0.001, start_epoch=0, end_epoch=50)
-
-
+    
     if opt.model_path != '':
         ckpt = torch.load(opt.model_path)
         model.load_state_dict(ckpt['model_state'])
@@ -225,7 +226,6 @@ def train(gpu, opt, output_dir, noises_init):
                 xs = []
                 recons = []
                 masks = []
-                current_kl_weight = annealer.get_weight(epoch)
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         x, mask, e_init, y, gap_pid, idx = data
@@ -251,20 +251,23 @@ def train(gpu, opt, output_dir, noises_init):
                         e_init = e_init.cuda()
                         criterion = criterion.cuda()
                         #noises_batch = noises_batch.cuda()
-                    pcs_recon, mu, logvar = model(x, mask, e_init)
+                    #recon, vq_loss, indices = model(x, mask, e_init)
+                    model_output = model(x, mask, e_init)
+                    recon, vq_loss, indices  = model_output
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
                     #loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
                     #loss, loss_xyz, loss_chamfer, loss_energy, loss_sum_e, kld_loss = vae_loss_function(x, pcs_recon, mu, logvar, init_energy, mask)
-                    loss_dict = criterion(
-                            preds=pcs_recon, 
-                            target=x, 
-                            target_mask=mask, 
-                            mu=mu, 
-                            logvar=logvar, 
-                            e_init=e_init,
-                            kl_weight = current_kl_weight,
-                        )
+                    
+                    # loss_dict = criterion(
+                    #         preds=recon, 
+                    #         target=x, 
+                    #         target_mask=mask, 
+                    #         vq_loss=vq_loss, 
+                    #         e_init=e_init,
+                    #     )
+                    loss_dict = criterion(model_output, x, mask)
                     loss = loss_dict['loss']
+
                                     
                     optimizer.zero_grad()
                     loss.backward()
@@ -275,22 +278,26 @@ def train(gpu, opt, output_dir, noises_init):
 
                     if i % opt.print_freq == 0 and should_diag:
 
-                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f}, loss_repulsion {:>10.4f}, loss_chamfer {:>10.4f}, , loss_energy {:>10.4f}, loss_global_e {:>10.4f},  kld_loss{:>10.4f}, hit_count{:>10.4f} '
+                        # logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f}, vq_loss {:>10.4f}, loss_chamfer {:>10.4f},  loss_energy {:>10.4f}, loss_global_e {:>10.4f}, loss_hit {:>10.4f} '
+                        #             .format(
+                        #         epoch, opt.niter, i, len(dataloader),loss.item(), loss_dict['vq_loss'], loss_dict['chamfer'], loss_dict["local_E"], loss_dict["global_E"], loss_dict["loss_hit"]
+                        #         ))
+                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]   loss: {:>10.4f}, vq_loss {:>10.4f}, mse_reco {:>10.4f}, bce_hit {:>10.4f} '
                                     .format(
-                                epoch, opt.niter, i, len(dataloader),loss.item(), loss_dict['repulsion'], loss_dict['chamfer'], loss_dict["local_E"], loss_dict["global_E"], loss_dict["kld"], loss_dict["hit_count"]
+                                epoch, opt.niter, i, len(dataloader), loss.item(), loss_dict['vq_loss'], loss_dict['mse_reco'], loss_dict['bce_hit'],
                                 ))
                     #TODO temporary. Instead of eval, save the generation and tested with physics metrics outside this script
                     if (i < 30) and ((epoch + 1) % opt.vizIter == 0) :
                         xs.append(x)
-                        recons.append(pcs_recon)
+                        recons.append(recon)
                         masks.append(mask)
                 if len(xs)>1:
                     xs = torch.cat(xs, 0)
                     recons = torch.cat(recons, 0)
                     masks = torch.cat(masks, 0)
                     
-                    torch.save([xs, recons, masks], f'{opt.pthsave}_pcvae_train_Jan_14_epoch_{epoch}_m.pth')  
-                    print(f"Samples fir testing save to {opt.pthsave}")
+                    torch.save([xs, recons, masks], f'{opt.pthsave}_pcvqvae_train_Jan_25_epoch_{epoch}.pth')  
+                    print(f"Samples for testing save to {opt.pthsave}")
                     
                 if (epoch + 1) % opt.vizIter == 0 and should_diag:
                     logger.info('eval')
@@ -299,7 +306,7 @@ def train(gpu, opt, output_dir, noises_init):
                     #pcs, gen = validate(gpu, opt, model, val_loader)
                     #model.eval()
                     with torch.no_grad():
-                        plot_4d_reconstruction(x, pcs_recon, savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
+                        plot_4d_reconstruction(x, recon, savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
                     if debug and x is not None and pcs_recon is not None:
                         visualize_pointcloud_batch('%s/epoch_%03d_samples_gen.png' % (outf_syn, epoch),
                                                 gen, None,
@@ -377,7 +384,7 @@ def parse_args():
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=256, help='input batch size') #lower bs if using repulsion loss
+    parser.add_argument('--bs', type=int, default=200, help='input batch size') #lower bs if using repulsion loss
     parser.add_argument('--workers', type=int, default=32, help='workers')
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)
@@ -385,7 +392,7 @@ def parse_args():
     parser.add_argument("--gap_classes", type=int, default=0, help=("Number of calorimeter materials used in simulated data"),)
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     '''model'''
-    parser.add_argument("--model_name", type=str, default="pc4dvae", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
+    parser.add_argument("--model_name", type=str, default="pc4dvqvae", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
     parser.add_argument('--kl_beta', default=0.0005)
     parser.add_argument('--schedule_type', default='linear')
     '''encoder decoder'''
@@ -420,9 +427,9 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', type=int, default=16, help='unit: epoch')
-    parser.add_argument('--diagIter', type=int, default=16, help='unit: epoch')
-    parser.add_argument('--vizIter', type=int, default=16, help='unit: epoch')
+    parser.add_argument('--saveIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--diagIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--vizIter', type=int, default=8, help='unit: epoch')
     parser.add_argument('--print_freq', type=int, default=32, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')

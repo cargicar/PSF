@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+#TODO: Replace VAE for VAE-VQ!!!
+
 #TODO find culprit for wrogn statistics at eval mode. Likely, change BN to LN
 class PointCloud4DVAE(nn.Module):
     def __init__(self, latent_dim=512, cond_dim=128, max_points=1700):
@@ -99,11 +101,19 @@ class ConditionalTransformerSpatialDecoder(nn.Module):
         self.d_model = latent_dim + cond_dim
         self.max_points = max_points
         
-        # 1. Learnable Queries (Replaces the fixed 2D grid)
+        # Learnable Queries (Replaces the fixed 2D grid)
         # This allows the model to learn 1700 unique "prototypes" 
         # that can move anywhere in 3D space.
-        self.query_embed = nn.Embedding(max_points, self.d_model)
+        #self.query_embed = nn.Embedding(max_points, self.d_model)
 
+        #replace learnable queries for random queries
+        # We will sample 3D noise (N, 3) and project it to (N, d_model)
+        # This acts as a "positional encoding" for the random start points.
+        self.noise_proj = nn.Sequential(
+            nn.Linear(3, self.d_model),
+            nn.LayerNorm(self.d_model), # Helps stability
+            nn.SiLU()
+        )
         # Condition projection
         self.cond_net = nn.Sequential(
             nn.Linear(1, cond_dim),
@@ -144,12 +154,22 @@ class ConditionalTransformerSpatialDecoder(nn.Module):
         # Memory shape: [B, 1, d_model]
         memory = torch.cat([z, e_emb], dim=1).unsqueeze(1) 
 
-        # --- 2. Prepare Queries ---
+        #Prepare Queries ---
         # Expand learnable queries for the batch
         # shape: [B, N, d_model]
-        queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)
+        #queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)
+        # Prepare Random Gaussian Queries ---
+        # Sample random points from a Gaussian distribution N(0, 1)
+        # This gives the transformer a "cloud" of random positions to start from.
+        # Shape: [B, N, 3]
+        noise_xyz = torch.randn(B, N, 3, device=z.device)
+        # Project noise to d_model dimensions
+        # Shape: [B, N, d_model]
+        queries = self.noise_proj(noise_xyz)
         
-        # --- 3. Transformer Decoding ---
+        # ---Transformer Decoding ---
+        # The transformer learns to "move" these random points 
+        # to the correct positions on the manifold.
         # Out: [B, N, d_model]
         latent_points = self.transformer(queries, memory)
 
@@ -157,6 +177,8 @@ class ConditionalTransformerSpatialDecoder(nn.Module):
         
         # A. Coordinates
         coords = self.fc_coords(latent_points)
+        # output can be "offset" from the random noise (residual learning), This sometimes converges faster.
+        coords = coords + noise_xyz
         
         # B. Energy
         # Use Softplus to enforce positivity. 
@@ -188,6 +210,29 @@ class KLAnnealer:
         # Linear interpolation
         progress = (epoch - self.start_epoch) / (self.end_epoch - self.start_epoch)
         return progress * self.target_kl
+class KLCyclicalAnnealer:
+    def __init__(self, target_kl=0.001, cycle_len=20, start_epoch=0):
+        self.target_kl = target_kl
+        self.cycle_len = cycle_len
+        self.start_epoch = start_epoch
+
+    def get_weight(self, epoch):
+        if epoch < self.start_epoch:
+            return 0.0
+        
+        # Calculate where we are in the current cycle (0.0 to 1.0)
+        # e.g., if cycle_len is 20, epoch 21 is index 1 (0.05 progress)
+        relative_epoch = (epoch - self.start_epoch) % self.cycle_len
+        progress = relative_epoch / self.cycle_len
+        
+        # Simple linear ramp that resets every 'cycle_len' epochs
+        # You can also cap it at 0.5 cycle (up-flat-reset) for better stability
+        if progress < 0.5:
+             # Ramp up for first half
+             return (progress * 2) * self.target_kl
+        else:
+             # Hold steady for second half
+             return self.target_kl
 
 class PointCloudVAELoss(nn.Module):
     def __init__(self, lambda_e_sum=1.0, lambda_hit=1.0, 
@@ -281,7 +326,7 @@ class PointCloudVAELoss(nn.Module):
 
         target_xyz = target[..., :3]    # [B, N, 3]
         target_E   = target[..., 3]     # [B, N]
-        loss_xyz = F.mse_loss(pred_xyz * m, target_xyz * m)
+        #loss_xyz = F.mse_loss(pred_xyz * m, target_xyz * m)
         # --- 2. Repulsion Loss (NEW) ---
         # Fixes the clustering by pushing points apart
         loss_repulsion = self.get_repulsion_loss(pred_xyz, h=self.distance_repulsion) * self.lambda_repulsion
@@ -353,9 +398,9 @@ class PointCloudVAELoss(nn.Module):
         loss_global_e = self.lambda_e_sum * loss_global_E_sum
         loss_hit_weighted = self.lambda_hit * loss_hit_count
         loss_hit_entr = 0.1 * loss_hit_entropy
+        #loss_xyz = 0.005*loss_xyz
         
         total_loss = (loss_chamfer) + \
-                     (loss_xyz) + \
                      (loss_repulsion) + \
                      (loss_local_E) + \
                      (loss_kld) + \
@@ -365,7 +410,6 @@ class PointCloudVAELoss(nn.Module):
         return {
             "loss": total_loss,
             "chamfer": loss_chamfer.item(),
-            "xyz": loss_xyz.item(),
             "repulsion": loss_repulsion.item(), # New log
             "local_E": loss_local_E.item(),
             "global_E": loss_global_e.item(),

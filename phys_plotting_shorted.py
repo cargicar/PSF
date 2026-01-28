@@ -526,7 +526,7 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
             
         ak_array_truth = ak.Array(data_dict)
         ak_array = ak.Array(gen_dict)
-    return ak_array, ak_array_truth
+    return ak_array, ak_array
 
 def make_plots(file_paths: list[str], #list containig file paths for simulation and generated data
                 material_list=["G4_W"],

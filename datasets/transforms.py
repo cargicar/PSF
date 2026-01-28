@@ -72,7 +72,7 @@ def invert_normalize_pc4d(x_norm: torch.Tensor, m_dist = None, centroid = None) 
     C_MAX = 30.0
     # Reverse Min-Max
     energy = energy * (E_MAX - E_MIN + 1e-6) + E_MIN
-    coords = coords * (C_MAX - C_MIN + 1e-6) + C_MIN
+    #coords = coords * (C_MAX - C_MIN + 1e-6) + C_MIN
     
     # Reverse log1p (e^x - 1)
     energy = torch.expm1(energy)

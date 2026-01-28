@@ -58,58 +58,6 @@ def profiler_table_output(prof, output_filename="profiling/cuda_memory_profile.t
     print(f"Profiler table saved to {output_filename}")
     
 
-@torch.no_grad()
-def validate(gpu, opt, model, val_loader, save_samples = False):
-    model.eval()
-    total_recon_loss = 0
-    total_kl_loss = 0
-    
-    # To store samples for visualization
-    sample_pcs = []
-    sample_recons = []
-    for i, data in enumerate(val_loader):
-        if opt.dataname == 'g4' or opt.dataname == 'idl':
-            x, mask, int_energy, y, gap_pid, idx = data
-        x = x.transpose(1,2)
-        
-        if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
-            x = x.cuda(gpu,  non_blocking=True)
-            mask = mask.cuda(gpu,  non_blocking=True)
-            y = y.cuda(gpu,  non_blocking=True)
-            gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
-            int_energy = int_energy.cuda(gpu,  non_blocking=True)
-            #noises_batch = noises_batch.cuda(gpu)
-        elif opt.distribution_type == 'single':
-            x = x.cuda()
-            mask = mask.cuda()
-            y = y.cuda()
-            gap_pid = gap_pid.cuda()
-            int_energy = int_energy.cuda()
-            #noises_batch = noises_batch.cuda()
-        pcs_recon, mu, logvar = model(x, mask)
-        
-        # Calculate losses using the masked Chamfer function from before
-        #recon_loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
-        recon_loss = masked_chamfer_4d(x, pcs_recon, mask, mask)
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
-        
-        total_recon_loss += recon_loss.item()
-        total_kl_loss += kl_loss.item()
-
-        # Save the first batch for visual inspection
-        if save_samples and i == 0:
-            sample_pcs.append(x[:4].cpu())       # Original
-            sample_recons.append(pcs_recon[:4].cpu()) # Reconstructed
-
-            return sample_pcs, sample_recons
-
-    avg_recon = total_recon_loss / len(val_loader)
-    avg_kl = total_kl_loss / len(val_loader)
-    
-    print(f"Validation - Recon (Chamfer): {avg_recon:.6f}, KL: {avg_kl:.6f}")
-    
-    return None, None
-
 def train(gpu, opt, output_dir, noises_init):
     debug = False
     set_seed(opt)
@@ -188,15 +136,12 @@ def train(gpu, opt, output_dir, noises_init):
         logger.info(opt)
 
     optimizer= optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
-    # criterion = PointCloudVQVAELoss(
-    #         lambda_e_sum=0.0, 
-    #         lambda_hit=0.0,
-    #         lambda_chamfer=0.0,
-    #         lambda_vq=1.0,
-    # )
     criterion = PointCloudVQVAELoss(
-            factor_vq=0.1, 
-            factor_hit = 0.0,
+            lambda_e_sum=1e-7, 
+            lambda_hit=1e-6,
+            lambda_chamfer=1e-4,
+            lambda_vq=1.0,
+            lambda_loc_e= 0.01,
     )
     lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
     
@@ -251,23 +196,20 @@ def train(gpu, opt, output_dir, noises_init):
                         e_init = e_init.cuda()
                         criterion = criterion.cuda()
                         #noises_batch = noises_batch.cuda()
-                    #recon, vq_loss, indices = model(x, mask, e_init)
-                    model_output = model(x, mask, e_init)
-                    recon, vq_loss, indices  = model_output
+                    recon, vq_loss, indices = model(x, mask, e_init)
+                    
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
                     #loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
                     #loss, loss_xyz, loss_chamfer, loss_energy, loss_sum_e, kld_loss = vae_loss_function(x, pcs_recon, mu, logvar, init_energy, mask)
                     
-                    # loss_dict = criterion(
-                    #         preds=recon, 
-                    #         target=x, 
-                    #         target_mask=mask, 
-                    #         vq_loss=vq_loss, 
-                    #         e_init=e_init,
-                    #     )
-                    loss_dict = criterion(model_output, x, mask)
+                    loss_dict = criterion(
+                            preds=recon, 
+                            target=x, 
+                            target_mask=mask, 
+                            vq_loss=vq_loss, 
+                            e_init=e_init,
+                        )
                     loss = loss_dict['loss']
-
                                     
                     optimizer.zero_grad()
                     loss.backward()
@@ -278,13 +220,9 @@ def train(gpu, opt, output_dir, noises_init):
 
                     if i % opt.print_freq == 0 and should_diag:
 
-                        # logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f}, vq_loss {:>10.4f}, loss_chamfer {:>10.4f},  loss_energy {:>10.4f}, loss_global_e {:>10.4f}, loss_hit {:>10.4f} '
-                        #             .format(
-                        #         epoch, opt.niter, i, len(dataloader),loss.item(), loss_dict['vq_loss'], loss_dict['chamfer'], loss_dict["local_E"], loss_dict["global_E"], loss_dict["loss_hit"]
-                        #         ))
-                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]   loss: {:>10.4f}, vq_loss {:>10.4f}, mse_reco {:>10.4f}, bce_hit {:>10.4f} '
+                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f}, vq_loss {:>10.4f}, loss_chamfer {:>10.4f},  loss_energy {:>10.4f}, loss_global_e {:>10.4f}, loss_hit {:>10.4f} '
                                     .format(
-                                epoch, opt.niter, i, len(dataloader), loss.item(), loss_dict['vq_loss'], loss_dict['mse_reco'], loss_dict['bce_hit'],
+                                epoch, opt.niter, i, len(dataloader),loss.item(), loss_dict['vq_loss'], loss_dict['chamfer'], loss_dict["local_E"], loss_dict["global_E"], loss_dict["loss_hit"]
                                 ))
                     #TODO temporary. Instead of eval, save the generation and tested with physics metrics outside this script
                     if (i < 30) and ((epoch + 1) % opt.vizIter == 0) :

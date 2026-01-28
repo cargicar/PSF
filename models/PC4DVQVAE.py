@@ -273,12 +273,13 @@ class PointCloudVQVAELoss(nn.Module):
 
 #NOTE old (similar to the one used for PCVAELoss)    
 # class PointCloudVQVAELoss(nn.Module):
-#     def __init__(self, lambda_e_sum=1.0, lambda_hit=1.0, lambda_chamfer=1.0, lambda_vq=1.0):
+#     def __init__(self, lambda_e_sum=1.0, lambda_hit=1.0, lambda_chamfer=1.0, lambda_vq=1.0, lambda_loc_e= 0.0):
 #         super().__init__()        
 #         self.lambda_e_sum = lambda_e_sum    # Global Energy conservation
 #         self.lambda_hit = lambda_hit        # Occupancy (MSE/BCE)
 #         self.lambda_chamfer = lambda_chamfer # Spatial Geometry
 #         self.lambda_vq = lambda_vq          # Commitment + Codebook Loss
+#         self.lambda_loc_e = lambda_loc_e
         
 #     def forward(self, preds, target, target_mask, vq_loss, e_init):
 #         """
@@ -353,14 +354,14 @@ class PointCloudVQVAELoss(nn.Module):
 #         total_target_E = (target_E * target_mask).sum(dim=1)
         
 #         loss_global_E_sum = F.mse_loss(total_pred_E, total_target_E) * self.lambda_e_sum
-
+#         loss_local_e = self.lambda_loc_e * loss_local_E
 #         # --- 6. Total Loss ---
-#         total_loss = loss_chamfer + loss_local_E + loss_hit_total + loss_global_E_sum + (vq_loss * self.lambda_vq)
+#         total_loss = loss_chamfer + loss_local_e + loss_hit_total + loss_global_E_sum + (vq_loss * self.lambda_vq)
         
 #         return {
 #             "loss": total_loss,
 #             "chamfer": loss_chamfer.item(),
-#             "local_E": loss_local_E.item(),
+#             "local_E": loss_local_e.item(),
 #             "global_E": loss_global_E_sum.item(),
 #             "loss_hit": loss_hit_total.item(),
 #             "vq_loss": vq_loss.item()

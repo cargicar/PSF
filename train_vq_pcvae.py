@@ -136,13 +136,14 @@ def train(gpu, opt, output_dir, noises_init):
         logger.info(opt)
 
     optimizer= optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
-    criterion = PointCloudVQVAELoss(
-            lambda_e_sum=1e-7, 
-            lambda_hit=1e-6,
-            lambda_chamfer=1e-4,
-            lambda_vq=1.0,
-            lambda_loc_e= 0.01,
-    )
+    # criterion = PointCloudVQVAELoss(
+    #         lambda_e_sum=1e-7, 
+    #         lambda_hit=1e-6,
+    #         lambda_chamfer=1e-4,
+    #         lambda_vq=1.0,
+    #         lambda_loc_e= 0.01,
+    # )
+    criterion = PointCloudVQVAELoss(factor_vq=1.0, factor_hit=1.0)
     lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
     
     if opt.model_path != '':
@@ -202,12 +203,19 @@ def train(gpu, opt, output_dir, noises_init):
                     #loss = masked_chamfer_distance(x, pcs_recon, mask, mask)
                     #loss, loss_xyz, loss_chamfer, loss_energy, loss_sum_e, kld_loss = vae_loss_function(x, pcs_recon, mu, logvar, init_energy, mask)
                     
+                    # loss_dict = criterion(
+                    #         preds=recon, 
+                    #         target=x, 
+                    #         target_mask=mask, 
+                    #         vq_loss=vq_loss, 
+                    #         e_init=e_init,
+                    #     )
                     loss_dict = criterion(
-                            preds=recon, 
+                            recon=recon, 
                             target=x, 
                             target_mask=mask, 
                             vq_loss=vq_loss, 
-                            e_init=e_init,
+                            #e_init=e_init,
                         )
                     loss = loss_dict['loss']
                                     
@@ -220,10 +228,13 @@ def train(gpu, opt, output_dir, noises_init):
 
                     if i % opt.print_freq == 0 and should_diag:
 
-                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f}, vq_loss {:>10.4f}, loss_chamfer {:>10.4f},  loss_energy {:>10.4f}, loss_global_e {:>10.4f}, loss_hit {:>10.4f} '
+                        # logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f}, vq_loss {:>10.4f}, loss_chamfer {:>10.4f},  loss_energy {:>10.4f}, loss_global_e {:>10.4f}, loss_hit {:>10.4f} '
+                        #             .format(
+                        #         epoch, opt.niter, i, len(dataloader),loss.item(), loss_dict['vq_loss'], loss_dict['chamfer'], loss_dict["local_E"], loss_dict["global_E"], loss_dict["loss_hit"]
+                        #         ))
+                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f}, vq_loss {:>10.4f}, loss_bce_hit {:>10.4f},  mse_reco {:>10.4f}'
                                     .format(
-                                epoch, opt.niter, i, len(dataloader),loss.item(), loss_dict['vq_loss'], loss_dict['chamfer'], loss_dict["local_E"], loss_dict["global_E"], loss_dict["loss_hit"]
-                                ))
+                                epoch, opt.niter, i, len(dataloader),loss.item(), loss_dict['vq_loss'], loss_dict['bce_hit'], loss_dict["mse_reco"],))
                     #TODO temporary. Instead of eval, save the generation and tested with physics metrics outside this script
                     if (i < 30) and ((epoch + 1) % opt.vizIter == 0) :
                         xs.append(x)

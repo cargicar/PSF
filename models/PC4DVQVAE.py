@@ -12,7 +12,9 @@ class VectorQuantizer(nn.Module):
         
         # The Codebook: [K, D]
         self.embedding = nn.Embedding(self.num_embeddings, self.embedding_dim)
-        self.embedding.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
+        #self.embedding.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
+        # Lets start with a normal distribution instead
+        self.embedding.weight.data.normal_(mean=0.0, std=1.0)
 
     def forward(self, inputs):
         # inputs: [B, Latent_Dim] (Flattened)
@@ -83,6 +85,7 @@ class PointCloud4DVQVAE(nn.Module):
         
         # Refinement MLP before VQ
         self.pre_vq_conv = nn.Linear(latent_dim, latent_dim)
+        self.pre_vq_norm = nn.LayerNorm(latent_dim)
 
         # --- Vector Quantizer ---
         # codebook size: num_embeddings (e.g. 1024), dim: latent_dim
@@ -117,6 +120,8 @@ class PointCloud4DVQVAE(nn.Module):
         
         # Refine before VQ
         z_e = self.pre_vq_conv(global_feat)
+        # Apply norm
+        z_e = self.pre_vq_norm(z_e)
         
         return z_e
 
@@ -217,7 +222,7 @@ class PointCloudVQVAELoss(nn.Module):
         self.factor_vq = factor_vq
         self.factor_hit = factor_hit
 
-    def forward(self, model_output, target, mask):
+    def forward(self, recon, target, target_mask, vq_loss):
         """
         Parameters
         ----------
@@ -229,7 +234,7 @@ class PointCloudVQVAELoss(nn.Module):
             Binary mask [B, N]
         """
         # 1. Unpack Output
-        recon, vq_loss, _ = model_output
+        #recon, vq_loss, _ = model_output
         
         # Transpose to [B, N, C] for easier slicing and masking
         recon = recon.transpose(1, 2)   # [B, N, 5]
@@ -244,8 +249,8 @@ class PointCloudVQVAELoss(nn.Module):
         recon_prob = recon[..., 4]  
 
         # 3. Masked Reconstruction Loss (Physics)
-        if mask is not None:
-            mask_bool = mask.bool()
+        if target_mask is not None:
+            mask_bool = target_mask.bool()
             
             # Select valid points [Total_Valid, 4]
             r_valid_phys = recon_phys[mask_bool]
@@ -259,7 +264,7 @@ class PointCloudVQVAELoss(nn.Module):
         # We train this on ALL points (both real and padding) so the model learns
         # to predict 1 for real and 0 for padding.
         # recon_prob: [B, N], mask: [B, N]
-        bce_hit = F.binary_cross_entropy(recon_prob, mask.float())
+        bce_hit = F.binary_cross_entropy(recon_prob, target_mask.float())
 
         # 5. Total Loss
         loss = mse_reco + (self.factor_vq * vq_loss) + (self.factor_hit * bce_hit)

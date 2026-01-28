@@ -25,8 +25,9 @@ class NormalizePC4D:
     pc: [4, N] (x, y, z, E)
     """
     def __call__(self, x: np.ndarray) -> np.ndarray:
-        coords = x[:3, :] # [3, N]
-        energy = x[3:, :] # [1, N]
+        
+        coords = x[:,:3] # [N, 3]
+        energy = x[:,3:] # [N,1]
         
         # TODO: read max e and min energy from somewhere else
         #NOTE Z-score is probably more robust normalization
@@ -44,7 +45,7 @@ class NormalizePC4D:
         #m_dist = np.max(np.sqrt(np.sum(coords**2, axis=0)))
         #coords = coords / (m_dist + 1e-6)
         #Lets do just some MIn-Max
-        #Ncoords = (coords-C_MIN)/ (C_MAX - C_MIN + 1e-6)
+        Ncoords = (coords-C_MIN)/ (C_MAX - C_MIN + 1e-6)
         # Log-scale energy and Min-Max normalize
         energy = np.log1p(energy) 
         energy = (energy - E_MIN) / (E_MAX - E_MIN + 1e-6)
@@ -53,7 +54,7 @@ class NormalizePC4D:
         #energy = (energy - e_mean) / (e_std + 1e-6)
         #energy = energy.unsqueeze(0)
         # np.concatenate with axis=0 is equivalent to torch.cat with dim=0
-        return np.concatenate([coords, energy], axis=0)    
+        return np.concatenate([Ncoords, energy], axis=1)    
     
 def invert_normalize_pc4d(x_norm: torch.Tensor, m_dist = None, centroid = None) -> np.ndarray:
     """
@@ -72,7 +73,7 @@ def invert_normalize_pc4d(x_norm: torch.Tensor, m_dist = None, centroid = None) 
     C_MAX = 30.0
     # Reverse Min-Max
     energy = energy * (E_MAX - E_MIN + 1e-6) + E_MIN
-    #coords = coords * (C_MAX - C_MIN + 1e-6) + C_MIN
+    coords = coords * (C_MAX - C_MIN + 1e-6) + C_MIN
     
     # Reverse log1p (e^x - 1)
     energy = torch.expm1(energy)
@@ -85,7 +86,6 @@ def invert_normalize_pc4d(x_norm: torch.Tensor, m_dist = None, centroid = None) 
     # Reverse Centering
     if centroid is not None:
         coords = coords + centroid
-        
     return torch.cat([coords, energy], dim=-2)
 
 class MinMaxNormalize:

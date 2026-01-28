@@ -143,7 +143,7 @@ def train(gpu, opt, output_dir, noises_init):
     #         lambda_vq=1.0,
     #         lambda_loc_e= 0.01,
     # )
-    criterion = PointCloudVQVAELoss(factor_vq=1.0, factor_hit=1.0)
+    criterion = PointCloudVQVAELoss(factor_vq=1.0, factor_hit=0.001, factor_mse=0.01)
     lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
     
     if opt.model_path != '':

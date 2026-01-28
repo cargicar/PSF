@@ -475,7 +475,7 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
         num_showers = x_tensor.shape[0]-1
     with torch.no_grad():
         for i in range(num_showers):
-            used_transform = False #Create flag and transforms list to invert 
+            used_transform = True #Create flag and transforms list to invert 
             if used_transform:
                 x_tensor = invert_normalize_pc4d(x_tensor)
                 gen_tensor = invert_normalize_pc4d(gen_tensor)
@@ -500,7 +500,7 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
             # Only keep points where the model is confident a hit exists
             #mask = pg > prob_threshold
             #redefine mask
-            mask = (pg > 0.3)
+            mask = (pg > 0.0)
             filtered_xg = xg[mask]
             filtered_yg = yg[mask]
             filtered_zg = zg[mask]
@@ -526,7 +526,7 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
             
         ak_array_truth = ak.Array(data_dict)
         ak_array = ak.Array(gen_dict)
-    return ak_array, ak_array
+    return ak_array, ak_array_truth
 
 def make_plots(file_paths: list[str], #list containig file paths for simulation and generated data
                 material_list=["G4_W"],
@@ -556,7 +556,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Plot generated showers vs ground truth")
     #parser.add_argument("--file_path", type=str, required=True, help="Path to the HDF5 file containing generated showers")
-    parser.add_argument('--dataroot', default="/pscratch/sd/c/ccardona/datasets/pth/_pcvqvae_train_Jan_25_epoch_9.pth")
+    parser.add_argument('--dataroot', default="/pscratch/sd/c/ccardona/datasets/pth/_pcvqvae_train_Jan_25_epoch_5.pth")
     parser.add_argument('--title', default='phys_pcvqvae.png')
     #parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2025-12-26-12-04-19/syn/photon_samples.pth')
     parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-06_clopodit_idl_mask/syn/combined_photon_samples.pth')

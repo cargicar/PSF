@@ -207,7 +207,7 @@ class ConditionalTransformerSpatialDecoder(nn.Module):
 
 #NOTE loss from omni_alpha_c paper
 class PointCloudVQVAELoss(nn.Module):
-    def __init__(self, factor_vq=1.0, factor_hit=1.0):
+    def __init__(self, factor_vq=1.0, factor_hit=1.0, factor_mse = 0.1):
         """
         Loss class for VQ-VAE with Occupancy Head.
 
@@ -221,6 +221,7 @@ class PointCloudVQVAELoss(nn.Module):
         super().__init__()
         self.factor_vq = factor_vq
         self.factor_hit = factor_hit
+        self.factor_mse = factor_mse
 
     def forward(self, recon, target, target_mask, vq_loss):
         """
@@ -266,14 +267,18 @@ class PointCloudVQVAELoss(nn.Module):
         # recon_prob: [B, N], mask: [B, N]
         bce_hit = F.binary_cross_entropy(recon_prob, target_mask.float())
 
+        scaled_mse = self.factor_mse * mse_reco
+        scaled_vq = self.factor_vq * vq_loss
+        scaled_hit = self.factor_hit * bce_hit
+
         # 5. Total Loss
-        loss = mse_reco + (self.factor_vq * vq_loss) + (self.factor_hit * bce_hit)
+        loss = scaled_mse + scaled_vq + scaled_hit
         
         return {
             "loss": loss,
-            "mse_reco": mse_reco.item(),
-            "bce_hit": bce_hit.item(),
-            "vq_loss": vq_loss.item()
+            "mse_reco": scaled_mse.item(),
+            "bce_hit": scaled_hit.item(),
+            "vq_loss": scaled_vq.item()
         }
 
 #NOTE old (similar to the one used for PCVAELoss)    

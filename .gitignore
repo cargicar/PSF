@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+#output files
+output/
+*.txt
+
 # pictures
 *.png 
 *.jpeg

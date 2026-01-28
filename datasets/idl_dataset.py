@@ -25,7 +25,7 @@ class LazyIDLDataset(Dataset):
         base_path = Path(self.data_dir)
         file_paths = list(base_path.rglob("*.h5")) + list(base_path.rglob("*.hdf5"))
         cache_path = Path(self.data_dir) / "dataset_cache.pkl"
-        self.max_particles = 1750 #FIXME hardcoded max particles
+        self.max_particles = 2000 #FIXME hardcoded max particles
         
         lengths = [] # Temporary list to find the min
         if cache_path.exists():

@@ -8,7 +8,6 @@
 # GLIDE: https://github.com/openai/glide-text2im
 # MAE: https://github.com/facebookresearch/mae/blob/main/models_mae.py
 # --------------------------------------------------------
-# Copied from: https://github.com/facebookresearch/DiT/blob/main/models.py
 
 import torch
 import torch.nn as nn
@@ -286,7 +285,6 @@ class EnergyEmbedder(nn.Module):
 
         return embeddings
 
-# Add this class
 class SineSpatialEmbedder(nn.Module):
     def __init__(self, hidden_size):
         super().__init__()
@@ -300,6 +298,32 @@ class SineSpatialEmbedder(nn.Module):
     def forward(self, x):
         # Assumes x contains coords in first 3 channels
         return self.mlp(x)
+    
+# Gonna replace the sinespatialembbeder for a mor sofisticate fourier embedder, which should be more sensitive to frequencies
+class FourierSpatialEmbedder(nn.Module):
+    def __init__(self, hidden_size, scale=30.0):
+        super().__init__()
+        self.hidden_size = hidden_size
+        # Random Gaussian matrix B. 
+        # We project 3 coords -> hidden_size // 2 pairs of (sin, cos)
+        self.register_buffer("B", torch.randn(3, hidden_size // 2) * scale)
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
+
+    def forward(self, x):
+        # x: (B, N, 3)
+        # 1. Fourier Projection
+        x_proj = (2 * torch.pi * x) @ self.B # (B, N, H/2)
+        
+        # 2. Sin/Cos activation
+        x_emb = torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1) # (B, N, H)
+        
+        # 3. Learnable MLP refinement
+        return self.mlp(x_emb)
     
 #############################################################################3
 #               Point Embedder  (Unused)                                 #
@@ -465,14 +489,14 @@ class DiT(nn.Module):
         #NOTE point transformer replaced PatchEmbed
         # AKA Tokenizer
         # Single Transformer Block
-        self.x_embedder = TransformerBlock(
-            config.in_features,
-            config.hidden_size,#config.transformer_features,
-            config.hidden_size,
-            config.k,
-            )
+        # self.x_embedder = TransformerBlock(
+        #     config.in_features,
+        #     config.hidden_size,#config.transformer_features,
+        #     config.hidden_size,
+        #     config.k,
+        #     )
         # Two blocks for improved complex geometric extraction
-        #self.x_embedder = PointEmbedder(config)
+        self.x_embedder = PointEmbedder(config)
 
         #NOTE  EdgeConvBlock replaced point transformer
         # self.x_embedder = EdgeConvBlock(
@@ -483,6 +507,8 @@ class DiT(nn.Module):
         #     )
 
         self.pos_embedder = SineSpatialEmbedder(config.hidden_size)
+        #TODO try later as a replacement for SineSpatialEmbbeder
+        #self.pos_embedder = FourierSpatialEmbedder(config.hidden_size)
         
         self.t_embedder = TimestepEmbedder(config.hidden_size)
 
@@ -910,3 +936,4 @@ DiT_models = {
     "DiT-S/4": DiT_S_4,
     "DiT-S/8": DiT_S_8,
 }
+# Copied from: https://github.com/facebookresearch/DiT/blob/main/models.py

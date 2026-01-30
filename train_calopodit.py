@@ -129,9 +129,10 @@ def train(gpu, opt, output_dir, noises_init):
             use_long_skip=True,
             final_conv=False,
         )
+        model = DiT(DiT_config)
     else:
         print(f"Model {opt.model_name} not implemented or not included in this script")
-    model = DiT(DiT_config)
+    
     
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
         def _transform_(m):
@@ -335,11 +336,11 @@ def train(gpu, opt, output_dir, noises_init):
                             #     full_x, full_pts, full_mask = x, pts, mask
                             # if gpu ==0:
                             #     torch.save([full_x, full_pts, full_mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
-                            torch.save([x, pts, mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
+                            torch.save([x, pts, mask], f'{opt.pthsave}calopodit_train_Jan_28_epoch_{epoch}.pth')  
                             print(f"Samples for testing save to {opt.pthsave}")
                             
-                        #with torch.no_grad():
-                        #    plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
+                        with torch.no_grad():
+                            plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
                     # if debug:
                     #     visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
                     #                             trajectory, None, None,
@@ -416,18 +417,18 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/w_sim/')
     parser.add_argument('--category', default='all', help='category of dataset')
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=256, help='input batch size')
+    parser.add_argument('--bs', type=int, default=40, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=1700)
     parser.add_argument("--num_classes", type=int, default=0, help=("Number of primary particles used in simulated data"),)
-    parser.add_argument("--gap_classes", type=int, default=2, help=("Number of calorimeter materials used in simulated data"),)
+    parser.add_argument("--gap_classes", type=int, default=0, help=("Number of calorimeter materials used in simulated data"),)
     
     '''model'''
     parser.add_argument("--model_name", type=str, default="calopodit", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
@@ -443,10 +444,10 @@ def parse_args():
     parser.add_argument("--train_time_distribution", type=str, default="uniform", help="Distribution of the training time samples. Choose between ['uniform', 'lognormal', 'u_shaped'].")
     parser.add_argument("--train_time_weight", type=str, default="uniform", help="Weighting of the training time samples. Choose between ['uniform'].")
     parser.add_argument("--criterion", type=str, default="mse", help="Criterion for the rectified flow. Choose between ['mse', 'l1', 'lpips'].")
-    parser.add_argument("--num_steps", type=int, default=100, help=(
+    parser.add_argument("--num_steps", type=int, default=1000, help=(
             "Number of steps for generation. Used in training Reflow and/or evaluation"),)
     #parser.add_argument("--sample_batch_size", type=int, default=100, help="Batch size (per device) for sampling images.",)
-    parser.add_argument("--num_samples", type=int, default=100, help="Batch size (per device) for sampling images.",)
+    parser.add_argument("--num_samples", type=int, default=64, help="Batch size (per device) for sampling images.",)
 
     #params
     parser.add_argument('--attention', default=True)
@@ -483,10 +484,10 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', type=int, default=8, help='unit: epoch')
-    parser.add_argument('--diagIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--saveIter', type=int, default=4, help='unit: epoch')
+    parser.add_argument('--diagIter', type=int, default=4, help='unit: epoch')
     parser.add_argument('--vizIter', type=int, default=80, help='unit: epoch')
-    parser.add_argument('--print_freq', type=int, default=8, help='unit: iter')
+    parser.add_argument('--print_freq', type=int, default=32, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
 

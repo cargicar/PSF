@@ -86,6 +86,49 @@ def gather_distributed_tensor(tensor):
     # 5. Concatenate
     return torch.cat(clean_list, dim=0)
 
+def load_checkpoint_with_gap_surgery(model, checkpoint_path, new_gap_classes_count):
+    # Load the existing state dict
+    ckpt = torch.load(checkpoint_path)
+    state_dict = ckpt['model_state']
+    
+    #  Identify the gap embedding weight
+    # assuming 'gap_embedder.embedding_table.weight'
+    old_weight = state_dict['gap_embedder.embedding_table.weight'] # Shape: (Old_N + 1, Dim)
+    
+    # Calculate how many new tokens we need
+    # We need: (New_Total_Classes + 1_Null_Token, Dim)
+    #NOTE: 'new_gap_classes_count' is the total number of non-null classes for fine tuning now.
+    current_rows, dim = old_weight.shape
+    target_rows = new_gap_classes_count + 1
+    
+    if target_rows > current_rows:
+        print(f"Expanding gap embedder from {current_rows} to {target_rows} rows...")
+        
+        # Keep the existing classes (indices 0 to N-1)
+        # Keep the NULL token (usually the last index)
+        existing_classes = old_weight[:-1] 
+        null_token = old_weight[-1:]
+        
+        # Initialize new class embeddings
+        # Strategy: Initialize them as the MEAN of existing classes + small noise
+        # This gives the model a "valid physics" starting point rather than random noise
+        mean_emb = existing_classes.mean(dim=0, keepdim=True)
+        num_new = target_rows - current_rows
+        new_embeddings = mean_emb.repeat(num_new, 1) + torch.randn(num_new, dim) * 0.02
+        
+        # Concatenate: [Existing, New, Null]
+        # We put Null at the very end to match LabelEmbedder logic
+        new_weight = torch.cat([existing_classes, new_embeddings, null_token], dim=0)
+        
+        # Update state dict
+        state_dict['gap_embedder.embedding_table.weight'] = new_weight
+        
+    # 4. Load into model
+    # Ensure your model is instantiated with the NEW number of classes
+    model.load_state_dict(state_dict, strict=True)
+    return model
+
+
 def test(gpu, opt, output_dir, noises_init):
     debug = False
     set_seed(opt)
@@ -215,7 +258,7 @@ def test(gpu, opt, output_dir, noises_init):
     model.eval()
     with torch.no_grad():
         for i, data in enumerate(dataloader):
-            if i > 20:
+            if i > 30:
                 break
             if opt.dataname == 'g4' or opt.dataname == 'idl':
                 x, mask, int_energy, y, gap_pid, idx = data
@@ -278,7 +321,24 @@ def test(gpu, opt, output_dir, noises_init):
                     )
                 pts= traj1.x_t
                 trajectory = traj1.trajectories
-                print(f"Rang {gpu}: Generating batch {i}")
+                print(f"Rank {gpu}: Generating batch {i}")
+                #if gpu == 0:
+                save_path = f'{opt.pthsave}_calopodit_gen_Jan_29_rank_{gpu}_batch_{i}.pth'
+                #torch.save([final_xs.cpu(), final_recons.cpu(), final_masks.cpu(), final_gaps.cpu()], save_path)  
+                torch.save([x.cpu(), pts.cpu(), mask.cpu()], save_path)  
+                print(f"Batch data saved to {save_path}")
+                
+                # Plotting (only needs to be done on master)
+                # Note: plot_4d_reconstruction might need CPU tensors
+                plot_4d_reconstruction(
+                    x.transpose(1,2), 
+                    pts.transpose(1,2), 
+                    savepath=f"{opt.pthsave}/reconstruction_gpu_{gpu}_batch_{i}.png", 
+                    index=0
+                )
+                if gpu == 0:
+                    print(f"plot saved at {opt.pthsave}")
+
                 xs.append(x)
                 recons.append(pts)
                 masks.append(mask)
@@ -301,7 +361,7 @@ def test(gpu, opt, output_dir, noises_init):
                 #                             None)
                 #make_phys_plots(x, pts, savepath = outf_syn)
 
-            logger.info('Generation: train')
+            logger.info('Generation: working on next batch')
         
         xs = torch.cat(xs, 0)
         recons = torch.cat(recons, 0)
@@ -317,8 +377,9 @@ def test(gpu, opt, output_dir, noises_init):
         else:
             final_xs, final_recons, final_masks, final_gaps = xs, recons, masks, gaps
         if gpu == 0:
-            save_path = f'{opt.pthsave}_calopodit_gen_Jan_20_FULL.pth'
-            torch.save([final_xs.cpu(), final_recons.cpu(), final_masks.cpu(), final_gaps.cpu()], save_path)  
+            save_path = f'{opt.pthsave}_calopodit_gen_Jan_29_FULL.pth'
+            #torch.save([final_xs.cpu(), final_recons.cpu(), final_masks.cpu(), final_gaps.cpu()], save_path)  
+            torch.save([final_xs.cpu(), final_recons.cpu(), final_masks.cpu()], save_path)  
             print(f"Full dataset saved to {save_path}")
             
             # Plotting (only needs to be done on master)
@@ -329,6 +390,7 @@ def test(gpu, opt, output_dir, noises_init):
                 savepath=f"{opt.pthsave}/reconstruction_final.png", 
                 index=0
             )
+            print(f"plot saved at {opt.pthsave}/reconstruction_final.png")
 
         if opt.distribution_type == 'multi':
             dist.barrier()
@@ -369,18 +431,18 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/w_sim/')
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=128, help='input batch size')
+    parser.add_argument('--bs', type=int, default=20, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)
     parser.add_argument("--num_classes", type=int, default=0, help=("Number of primary particles used in simulated data"),)
-    parser.add_argument("--gap_classes", type=int, default=2, help=("Number of calorimeter materials used in simulated data"),)
+    parser.add_argument("--gap_classes", type=int, default=0, help=("Number of calorimeter materials used in simulated data"),)
     
     '''model'''
     parser.add_argument("--model_name", type=str, default="calopodit", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
@@ -396,8 +458,7 @@ def parse_args():
     parser.add_argument("--train_time_distribution", type=str, default="uniform", help="Distribution of the training time samples. Choose between ['uniform', 'lognormal', 'u_shaped'].")
     parser.add_argument("--train_time_weight", type=str, default="uniform", help="Weighting of the training time samples. Choose between ['uniform'].")
     parser.add_argument("--criterion", type=str, default="mse", help="Criterion for the rectified flow. Choose between ['mse', 'l1', 'lpips'].")
-    parser.add_argument("--num_steps", type=int, default=1000, help=(
-            "Number of steps for generation. Used in training Reflow and/or evaluation"),)
+    parser.add_argument("--num_steps", type=int, default=1000, help=("Number of steps for generation. Used in training Reflow and/or evaluation"),)
     parser.add_argument("--sample_batch_size", type=int, default=100, help="Batch size (per device) for sampling images.",)
 
     #params

@@ -2,7 +2,7 @@ import torch
 import os
 from pathlib import Path
 
-def combine_pth_files(input_dir, output_filename, pattern="*_calopodit_gen_Jan_29_rank*.pth"):
+def combine_pth_files(input_dir, output_filename, pattern="_calopodit_gen_gapclasse_Ta_Feb_1_rank_*.pth"):
     input_path = Path(input_dir)
     
     # 1. Filter and sort files (sorting ensures samples_1 comes before samples_2)
@@ -41,6 +41,6 @@ def combine_pth_files(input_dir, output_filename, pattern="*_calopodit_gen_Jan_2
 if __name__ == "__main__":
     # Update these paths to match your setup
     target_directory = "/pscratch/sd/c/ccardona/datasets/pth" 
-    output_file = f"/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Jan_30_half_w.pth"
+    output_file = f"/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_1_train_ta_w.pth"
     
     combine_pth_files(target_directory, output_file)

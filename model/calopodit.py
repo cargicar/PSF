@@ -19,7 +19,6 @@ import math
 
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from timm.models.vision_transformer import Mlp
 from model.PTransformer import TransformerBlock
 #from src.models.edge_conv import EdgeConvBlock
 
@@ -27,42 +26,106 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
 
 #replacing timm Attention for nn.MultuheadAttention
+# class NativeAttention(nn.Module):
+#     def __init__(self, dim, num_heads, qkv_bias=True, attn_drop=0., proj_drop=0.):
+#         super().__init__()
+#         self.mha = nn.MultiheadAttention(
+#             embed_dim=dim,
+#             num_heads=num_heads,
+#             dropout=attn_drop,
+#             bias=qkv_bias,
+#             batch_first=True  # Critical: Matches (Batch, Points, Dim) layout
+#         )
+#         self.proj_drop = nn.Dropout(proj_drop)
+
+#     def forward(self, x, key_padding_mask = None):
+#         """
+#         x: (Batch, Points, Dim)
+#         mask: (Batch, Points) Boolean tensor. True=Keep, False=Pad/Ignore.
+#         """
+#         # Pass x for query, key, value
+#         out, _ = self.mha(
+#             query=x, 
+#             key=x, 
+#             value=x, 
+#             key_padding_mask=key_padding_mask, 
+#             need_weights=False 
+#         )
+#         return self.proj_drop(out)
+
+# Replaces nn.MultiheadAttention with optimized F.scaled_dot_product_attention
 class NativeAttention(nn.Module):
     def __init__(self, dim, num_heads, qkv_bias=True, attn_drop=0., proj_drop=0.):
         super().__init__()
-        self.mha = nn.MultiheadAttention(
-            embed_dim=dim,
-            num_heads=num_heads,
-            dropout=attn_drop,
-            bias=qkv_bias,
-            batch_first=True  # Critical: Matches (Batch, Points, Dim) layout
-        )
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim ** -0.5
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x, mask=None):
-        """
-        x: (Batch, Points, Dim)
-        mask: (Batch, Points) Boolean tensor. True=Keep, False=Pad/Ignore.
-        """
-        key_padding_mask = None
-        if mask is not None:
-            # nn.MultiheadAttention expects:
-            # True = IGNORE (Pad)
-            # False = KEEP
-            # Your mask is True=Keep, so we must invert it with ~
-            key_padding_mask = ~mask.bool()
+    def forward(self, x, key_padding_mask=None):
+        B, N, C = x.shape
+        # Shape: (B, N, 3, Heads, Head_Dim) -> (3, B, Heads, N, Head_Dim)
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
 
-        # We pass 'x' for query, key, and value (Self-Attention)
-        # need_weights=False is important for FlashAttention optimization
-        out, _ = self.mha(
-            query=x, 
-            key=x, 
-            value=x, 
-            key_padding_mask=key_padding_mask, 
-            need_weights=False 
+        # Handle Mask for SDPA
+        # SDPA expects an attention mask of shape (B, Heads, Target_Seq, Source_Seq)
+        # OR (B, 1, 1, Source_Seq) for key padding.
+        attn_mask = None
+        if key_padding_mask is not None:
+            # key_padding_mask is Boolean: True=Ignore, False=Keep
+            # We must reshape it to (B, 1, 1, N) so it broadcasts over Heads and Query-positions
+            attn_mask = key_padding_mask.view(B, 1, 1, N)
+            
+            # SDPA with boolean mask: True means "Mask out / Ignore" (Newer PyTorch versions)
+            # Ensure consistency. If using older PyTorch < 2.4, you might need to cast to float and use -inf.
+            # Assuming PyTorch 2.0+:
+            # We expand to full matrix to ensure compatibility
+            attn_mask = attn_mask.expand(-1, self.num_heads, N, -1)
+
+        # This line triggers FlashAttention if available
+        x = F.scaled_dot_product_attention(
+            q, k, v, 
+            attn_mask=attn_mask,
+            dropout_p=self.attn_drop.p if self.training else 0.0
         )
+
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+    
+#Replaces timms.Mlp
+class GluMlp(nn.Module):
+    """
+    Gated Linear Unit MLP (SwiGLU). 
+    """
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.SiLU, drop=0.):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
         
-        return self.proj_drop(out)
+        # SwiGLU halves the effective width, so we often double the hidden_dim 
+        # to maintain capacity, or keep it standard. 
+        # Standard convention: fc1 projects to 2 * hidden, then split.
+        self.fc1 = nn.Linear(in_features, hidden_features * 2)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        x, gate = self.fc1(x).chunk(2, dim=-1)
+        x = x * self.act(gate) # Swish Gate
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
 
 #TODO: Implement EdgeConv from DGCNN as an laternative of PatchEmbedPointTransformer
 def modulate(x, shift, scale):
@@ -93,7 +156,6 @@ class DiTConfig:
     mlp_ratio: int = 4.0
     class_dropout_prob: float = 0.1
     use_long_skip: bool = True
-    final_conv: bool = False
 
 
 #################################################################################
@@ -299,14 +361,15 @@ class SineSpatialEmbedder(nn.Module):
         # Assumes x contains coords in first 3 channels
         return self.mlp(x)
     
-# Gonna replace the sinespatialembbeder for a mor sofisticate fourier embedder, which should be more sensitive to frequencies
 class FourierSpatialEmbedder(nn.Module):
     def __init__(self, hidden_size, scale=30.0):
         super().__init__()
         self.hidden_size = hidden_size
-        # Random Gaussian matrix B. 
-        # We project 3 coords -> hidden_size // 2 pairs of (sin, cos)
-        self.register_buffer("B", torch.randn(3, hidden_size // 2) * scale)
+        # Make B a non-trainable buffer (fixed random frequencies)
+        self.register_buffer("B", torch.randn(3, hidden_size // 2))
+        
+        # Make scale a learnable parameter initialized to 30.0
+        self.scale = nn.Parameter(torch.tensor(scale))
         
         self.mlp = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
@@ -316,15 +379,13 @@ class FourierSpatialEmbedder(nn.Module):
 
     def forward(self, x):
         # x: (B, N, 3)
-        # 1. Fourier Projection
-        x_proj = (2 * torch.pi * x) @ self.B # (B, N, H/2)
+        # Apply learnable scale
+        x_proj = (2 * torch.pi * x) @ (self.B * self.scale)
         
-        # 2. Sin/Cos activation
-        x_emb = torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1) # (B, N, H)
-        
-        # 3. Learnable MLP refinement
+        x_emb = torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
         return self.mlp(x_emb)
     
+
 #############################################################################3
 #               Point Embedder  (Unused)                                 #
 ##########################################################################
@@ -389,10 +450,11 @@ class DiTBlock(nn.Module):
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
-        self.mlp = Mlp(
+        # Replace self.mlp = Mlp(...) 
+        self.mlp = GluMlp(
             in_features=hidden_size,
-            hidden_features=mlp_hidden_dim,
-            act_layer=approx_gelu,
+            hidden_features=int(hidden_size * mlp_ratio),
+            act_layer=nn.SiLU, # SiLU is standard for SwiGLU
             drop=0,
         )
         self.adaLN_modulation = nn.Sequential(
@@ -400,19 +462,18 @@ class DiTBlock(nn.Module):
         )
         self.skip_linear = nn.Linear(2 * hidden_size, hidden_size) if skip else None
 
-    def forward(self, x, c, mask= None, x_skip=None):
+    def forward(self, x, c, key_padding_mask = None, x_skip=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.adaLN_modulation(c).chunk(6, dim=1)
         )
 
         if self.skip_linear is not None:
             x = self.skip_linear(torch.cat([x, x_skip], dim=-1))
-
+        
         x = x + gate_msa.unsqueeze(1) * self.attn(
             modulate(self.norm1(x), shift_msa, scale_msa),
-            mask=mask 
-        )
-        
+            key_padding_mask=key_padding_mask 
+        )        
         x = x + gate_mlp.unsqueeze(1) * self.mlp(
             modulate(self.norm2(x), shift_mlp, scale_mlp)
         )
@@ -497,6 +558,7 @@ class DiT(nn.Module):
         #     )
         # Two blocks for improved complex geometric extraction
         self.x_embedder = PointEmbedder(config)
+        self.embed_norm = nn.LayerNorm(config.hidden_size, elementwise_affine=False, eps=1e-6) #to stabilize variance before DiTBlocks
 
         #NOTE  EdgeConvBlock replaced point transformer
         # self.x_embedder = EdgeConvBlock(
@@ -506,9 +568,9 @@ class DiT(nn.Module):
         #     config.k,
         #     )
 
-        self.pos_embedder = SineSpatialEmbedder(config.hidden_size)
+        #self.pos_embedder = SineSpatialEmbedder(config.hidden_size)
         #TODO try later as a replacement for SineSpatialEmbbeder
-        #self.pos_embedder = FourierSpatialEmbedder(config.hidden_size)
+        self.pos_embedder = FourierSpatialEmbedder(config.hidden_size)
         
         self.t_embedder = TimestepEmbedder(config.hidden_size)
 
@@ -580,16 +642,6 @@ class DiT(nn.Module):
         self.final_layer = FinalLayer(
             config.hidden_size, self.out_channels
         )
-        # self.final_layer = FinalLayer(
-        #     config.hidden_size, config.patch_size, self.out_channels
-        # )
-        
-        # self.final_conv = (
-        #     nn.Conv2d(config.out_channels, config.out_channels, 3, padding=1)
-        #     if config.final_conv
-        #     else nn.Identity()
-        # )
-        self.final_conv = nn.Linear(config.out_channels, config.out_channels) if config.final_conv else nn.Identity()
 
     def initialize_weights(self):
         # Initialize transformer layers:
@@ -616,6 +668,8 @@ class DiT(nn.Module):
         # Initialize label embedding table:
         if hasattr(self, "y_embedder"):
             nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+            # Explicitly zero out the last embedding (the null token)
+            nn.init.zeros_(self.y_embedder.embedding_table.weight[self.config.num_classes])
         if hasattr(self, "gap_embedder"):
             nn.init.normal_(self.gap_embedder.embedding_table.weight, std=0.02)
         if hasattr(self, "e_embedder"):
@@ -627,14 +681,15 @@ class DiT(nn.Module):
                     if layer.bias is not None:
                         nn.init.zeros_(layer.bias)              
             # Initialize null embedding parameter
-            nn.init.normal_(self.e_embedder.null_embedding, std=0.02)
+            nn.init.zeros_(self.e_embedder.null_embedding)
+            #nn.init.normal_(self.e_embedder.null_embedding, std=0.02)
+
         # Initialize conditional fuser weights closer to identity to not break training stability start
         if isinstance(self.condition_fuser, nn.Sequential):
-            nn.init.xavier_uniform_(self.condition_fuser[0].weight)
-            nn.init.zeros_(self.condition_fuser[0].bias)
-            nn.init.zeros_(self.condition_fuser[2].weight) # Output zero init usually helps DiT
-            nn.init.zeros_(self.condition_fuser[2].bias)
-
+            for layer in self.condition_fuser:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight)
+                    nn.init.zeros_(layer.bias)
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
@@ -692,124 +747,96 @@ class DiT(nn.Module):
 
         return model
 
-    # def unpatchify(self, x):
-    #     """
-    #     x: (N, T, patch_size**2 * C)
-    #     imgs: (N, H, W, C)
-    #     """
-    #     c = self.out_channels
-    #     #p = self.x_embedder.patch_size[0]
-    #     h = w = int(x.shape[1] ** 0.5)
-    #     assert h * w == x.shape[1]
-
-    #     x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
-    #     x = torch.einsum("nhwpqc->nchpwq", x)
-    #     imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
-    #     return imgs
-
-    def forward(self, x: torch.Tensor, t: torch.Tensor, y=None, gap=None, energy = None, mask = None, force_drop_ids=None):
+    def forward(self, x: torch.Tensor, t: torch.Tensor, y=None, gap=None, energy=None, mask=None, force_drop_ids=None):
         """
         Forward pass of DiT.
-        x: (N, HxW,C)=(N, Points, C) tensor of spatial point inputs 
+        x: (N, Points, C) tensor of spatial point inputs 
         t: (N,) tensor of diffusion timesteps
-        y: (N,) tensor of class labels
         """
+        # 1. Prepare Mask for Attention (True = Ignore/Pad)
+        key_padding_mask = ~mask.bool() if mask is not None else None
 
-        # Extract explicit coordinates (assuming first 3 channels are x,y,z)
+        # 2. Spatial Embeddings
         coords = x[..., :3] 
-        x_features = self.x_embedder(x, mask=mask)[0] # for single transofrmer block (points:(N,P,transformer_features)) 
+        # FIX: Removed [0] index
+        x_features = self.x_embedder(x, mask=mask) 
         
-        #x_features = self.x_embedder(x, mask=mask) # for twoblock point embedder PointEmbedder returns just the features
-        
-        # Add absolute position info to the features
         pos_emb = self.pos_embedder(coords)
         x = x_features + pos_emb 
+        x = self.embed_norm(x)
 
-        #t = self.t_embedder(t)  # (N, D)
-        t_emb = self.t_embedder(t)  # c is (N, D)
-        cond_list= [t_emb]
-        # Collect all conditional embeddings
+        # 3. Conditional Embeddings
+        t_emb = self.t_embedder(t)
+        cond_list = [t_emb]
+
         if hasattr(self, "y_embedder"):
-            y_emb = self.y_embedder(y, self.training, force_drop_ids=force_drop_ids)
-            cond_list.append(y_emb)
-
+            cond_list.append(self.y_embedder(y, self.training, force_drop_ids))
         if hasattr(self, "gap_embedder"):
-            gap_emb = self.gap_embedder(gap, self.training, force_drop_ids=force_drop_ids)
-            cond_list.append(gap_emb)
-
+            cond_list.append(self.gap_embedder(gap, self.training, force_drop_ids))
         if hasattr(self, "e_embedder"):
-            energy_emb = self.e_embedder(energy, self.training, force_drop_ids=force_drop_ids)
-            cond_list.append(energy_emb)
+            cond_list.append(self.e_embedder(energy, self.training, force_drop_ids))
 
-        # Concatenate (along feature dim)
-        # Shape becomes (N, hidden_size * num_conditions)
-        c_concat = torch.cat(cond_list, dim=-1) 
+        # Fuse
+        c = self.condition_fuser(torch.cat(cond_list, dim=-1))
 
-        #  Fuse back to (N, hidden_size)
-        c = self.condition_fuser(c_concat)
-        #'c' contains t + y (+ gap) (+ energy) 
+        # 4. Transformer Backbone with Checkpointing
         skips = []
-        for idx, block in enumerate(self.in_blocks):
-            #x = block(x, c, mask = mask)  # (N, T, D)
-            x = checkpoint(block, x, c, mask, use_reentrant=False)
+        for block in self.in_blocks:
+            # Pass key_padding_mask instead of raw mask
+            x = checkpoint(block, x, c, key_padding_mask, use_reentrant=False)
             skips.append(x)
 
-        #x = self.mid_block(x, c, mask)  # (N, T, D)
-        x = checkpoint(self.mid_block, x, c, mask, use_reentrant=False)
-        
-        for block in self.out_blocks:
-            #x = block(x, c, mask = mask, x_skip=skips.pop())  # (N, T, D), with long skip connections
-            x_skip = skips.pop()
-            # checkpoint expects: function, arg1, arg2...
-            x = checkpoint(block, x, c, mask, x_skip, use_reentrant=False)
-        x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
-        #NOTE Not needed for point transformer?
-        #x = self.unpatchify(x)  # (N, out_channels, H, W)
-        x = self.final_conv(x)  # (N, out_channels, H, W)
+        x = checkpoint(self.mid_block, x, c, key_padding_mask, use_reentrant=False)
 
-        #NOTE Zero out the padded points in the output
+        for block in self.out_blocks:
+            x_skip = skips.pop()
+            x = checkpoint(block, x, c, key_padding_mask, x_skip, use_reentrant=False)
+
+        # 5. Output
+        x = self.final_layer(x, c) 
+
+        # Zero out padded points
         if mask is not None:
-            # mask is (N, P), x is (N, P, C)
             x = x * mask.unsqueeze(-1)
             
         return x
     
-    def forward_with_cfg(self, x, t, y, gap, energy, mask, cfg_scale):
+    def forward_with_cfg(self, x, t, cfg_scale, y=None, gap=None, energy=None, mask=None):
         """
         Forward pass with Classifier-Free Guidance extrapolation.
-        cfg_scale: 0.0 or 1.0 means no guidance, > 1.0 means guidance.
         """
-        # 1. Duplicate inputs for batch processing: 
-        # One half for conditional, one half for unconditional
-        # (Optional: You can do two separate passes if memory is tight)
+        # 1. Duplicate inputs for batch processing
         combined_x = torch.cat([x, x], dim=0)
         combined_t = torch.cat([t, t], dim=0)
+        
+        # Handle optionals robustly
         combined_y = torch.cat([y, y], dim=0) if y is not None else None
         combined_gap = torch.cat([gap, gap], dim=0) if gap is not None else None
         combined_energy = torch.cat([energy, energy], dim=0) if energy is not None else None
         combined_mask = torch.cat([mask, mask], dim=0) if mask is not None else None
         
-        # 2. Create "Null" conditions for the second half of the batch
-        # We use force_drop_ids=1 to trigger the null_embedding in your embedders
+        # 2. Create "Null" conditions for the second half
         batch_size = x.shape[0]
         force_drop = torch.zeros(batch_size * 2, device=x.device)
         force_drop[batch_size:] = 1  # Second half is unconditional
         
-        # 3. Pass through the model
-        # Note: Modify your forward() to pass force_drop_ids to the embedders
+        # 3. Pass through model using Kwargs (Safer than positional)
+        # We pass 'mask' (the bool/int mask), and forward() converts it to key_padding_mask
         model_out = self.forward(
-            combined_x, combined_t, combined_y, combined_gap, combined_energy, 
-            mask=combined_mask, force_drop_ids=force_drop
+            x=combined_x, 
+            t=combined_t, 
+            y=combined_y, 
+            gap=combined_gap, 
+            energy=combined_energy, 
+            mask=combined_mask, 
+            force_drop_ids=force_drop
         )
         
         # 4. Split and Extrapolate
         eps_cond, eps_uncond = model_out.chunk(2, dim=0)
-        
-        # The CFG Equation: eps = eps_uncond + scale * (eps_cond - eps_uncond)
         guided_eps = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
         
         return guided_eps
-
 
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #

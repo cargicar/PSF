@@ -7,6 +7,8 @@ import torch
 from typing import List, Tuple, Literal
 import pickle
         
+material_dict = {"G4_W" : 0, "G4_Ta": 1, "G4_Pb" : 2 }
+particle_dict = {"Photon" : 0, "eelectron" : 1}
 class LazyIDLDataset(Dataset):
     def __init__(self, data_dir, transform=None, reflow= False):
         self.data_dir = data_dir
@@ -25,7 +27,7 @@ class LazyIDLDataset(Dataset):
         base_path = Path(self.data_dir)
         file_paths = list(base_path.rglob("*.h5")) + list(base_path.rglob("*.hdf5"))
         cache_path = Path(self.data_dir) / "dataset_cache.pkl"
-        self.max_particles = 2000 #FIXME hardcoded max particles
+        self.max_particles = 2200 #FIXME hardcoded max particles
         
         lengths = [] # Temporary list to find the min
         if cache_path.exists():
@@ -93,7 +95,8 @@ class LazyIDLDataset(Dataset):
                 # Use [:] for faster slicing than [()]
                 indices = group["indices"][:]
                 values = group["values"][:]
-                
+                material = group['material'][()].decode('utf-8')
+                gap_pid = material_dict[material]
                 # Efficiently stack instead of concatenate + newaxis
                 shower = np.column_stack((indices, values))
                 
@@ -106,8 +109,8 @@ class LazyIDLDataset(Dataset):
                 return (
                     torch.from_numpy(shower).float(),
                     torch.tensor(initial_energy).float(),
-                    torch.tensor(0).long(), # material_index
-                    torch.tensor(0).long(), # gap_pid
+                    torch.tensor(0).long(), # particle_index#TODO hardcoded photon
+                    torch.tensor(gap_pid).long(), # gap_pid
                     idx
                 )
             except Exception as e:

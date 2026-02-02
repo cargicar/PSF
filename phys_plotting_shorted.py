@@ -397,7 +397,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     return fig        
 
 # This function take a list: file_path= [(original hdf5 file dataset), (generated samples file: ak, pth, or another)]
-def read_generated(file_path, material_list=["G4_Ta","G4_W",],num_showers=-1,material="G4_W"):
+def read_generated(file_path, material_list=["G4_Ta","G4_W",],num_showers=-1,material="G4_Ta", use_mask = False):
 
 
     gen_dict = {
@@ -418,7 +418,7 @@ def read_generated(file_path, material_list=["G4_Ta","G4_W",],num_showers=-1,mat
     elif "pth" in file_path[1]:
         gen_tensor = torch.load(file_path[1], map_location= 'cpu')
         if isinstance(gen_tensor, list):
-            _ , gen_tensor, _ = gen_tensor
+            _ , gen_tensor, mask = gen_tensor
     else:
         print(f"Array or Tensor format not implemented yet")
     
@@ -438,22 +438,25 @@ def read_generated(file_path, material_list=["G4_Ta","G4_W",],num_showers=-1,mat
             x, y, z= shower['indices'][()].T
             energy = shower['values'][()]
             mat = shower['material'][()]
+            
             if i % 5000 == 0 or i == num_showers:
                 print(f"Shower #: {i}/{num_showers}, Material: {mat}")
 
             if mat.decode('utf-8') != material:
                 continue
             if "pth" in file_path[1]:
+                #if use_mask: gen_tensor = gen_tensor[mask.bool()]
+                if use_mask: gen_tensor = gen_tensor * mask.unsqueeze(-1)
                 if gen_tensor.shape[1] == 4:
                     # 0:x, 1:y, 2:z, 3:E, 4:hit_prob
                     xg, yg, zg, eg = gen_tensor[i] 
                 else:
                     xg, yg, zg, eg = gen_tensor[i].T     
-
-                gen_dict["z"].append(zg)
-                gen_dict["x"].append(xg)
-                gen_dict["y"].append(yg)
-                gen_dict["energy"].append(eg)
+                
+                    gen_dict["z"].append(zg)
+                    gen_dict["x"].append(xg)
+                    gen_dict["y"].append(yg)
+                    gen_dict["energy"].append(eg)
 
             data_dict["z"].append(z)
             data_dict["x"].append(x)
@@ -542,7 +545,7 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
     return ak_array, ak_array_truth
 
 def make_plots(file_paths: list[str], #list containig file paths for simulation and generated data
-                material_list=["G4_W"],
+                material_list=["G4_Ta"],
                 num_showers=-1,
                 title= None):
     #filepath[0] : simulation data
@@ -569,11 +572,11 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Plot generated showers vs ground truth")
     #parser.add_argument("--file_path", type=str, required=True, help="Path to the HDF5 file containing generated showers")
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/w_sim/photon-shower-0_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/test/ta_sim_test/photon-shower-76_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Jan_17.pth') # For the case when we can to read original and generated from the same pth file
-    parser.add_argument('--title', default='phys_metrics_calopodi_samll_w_jan_29.png')
+    parser.add_argument('--title', default='phys_metrics_calopodit_feb_1_class_ta_w_ta_sample.png')
     #parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/logs/example_backbone/runs/2026-01-28_17-10-16_nid001133_InvolvedIrredentist/gen_samples/showers.parquet')
-    parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Jan_30_half_w.pth')
+    parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_1_train_ta_w.pth')
     #parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-06_clopodit_idl_mask/syn/combined_photon_samples.pth')
     parser.add_argument("--num_showers", type=int, default=-1, help="Number of showers to process (-1 for all)")
     args = parser.parse_args()

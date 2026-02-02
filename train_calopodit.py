@@ -69,6 +69,133 @@ def gather_all_gpu_tensors(local_tensor):
     # Concatenate along the batch dimension (dim 0) to get size 256
     return torch.cat(gathered_list, dim=0)
 
+def load_checkpoint_with_gap_surgery(model, checkpoint_path, new_gap_classes, new_particle_classes=0): #NOTE new_gap_clasess = total number
+    # Load the existing state dict
+    ckpt = torch.load(checkpoint_path, map_location="cpu") # map_location avoids GPU memory spikes
+    state_dict = ckpt['model_state']
+    
+    # --- DDP Handling Steps ---
+    # 1. Check if the IN-MEMORY model is wrapped in DDP (has "module." prefix)
+    is_model_ddp = hasattr(model, "module")
+    
+    # 2. Check if the CHECKPOINT has "module." prefix
+    # We look at the first key to guess
+    first_key = next(iter(state_dict.keys()))
+    is_ckpt_ddp = first_key.startswith("module.")
+
+    # 3. Create a helper to map logical names to actual keys in this specific checkpoint
+    def get_ckpt_key(logical_name):
+        if is_ckpt_ddp:
+            return f"module.{logical_name}"
+        return logical_name
+    
+    # Define the logical name of the layer we want to edit
+    target_layer_name = 'gap_embedder.embedding_table.weight'
+    actual_key = get_ckpt_key(target_layer_name)
+
+    # --- Surgery Logic ---
+    if actual_key in state_dict:
+        old_weight = state_dict[actual_key] # Shape: (Old_N + 1, Dim)
+        current_rows, dim = old_weight.shape
+        target_rows = new_gap_classes + 1
+        if target_rows > current_rows:
+            print(f"Expanding gap embedder from {current_rows} to {target_rows} rows...")
+            
+            # Keep the existing classes (indices 0 to N-1)
+            # Keep the NULL token (usually the last index)
+            existing_classes = old_weight[:-1] 
+            null_token = old_weight[-1:]
+            
+            # Initialize new class embeddings
+            mean_emb = existing_classes.mean(dim=0, keepdim=True)
+            num_new = target_rows - current_rows
+            new_embeddings = mean_emb.repeat(num_new, 1) + torch.randn(num_new, dim) * 0.02
+            
+            # Concatenate: [Existing, New, Null]
+            new_weight = torch.cat([existing_classes, new_embeddings, null_token], dim=0)
+            
+            # Update state dict using the actual key found in the file
+            state_dict[actual_key] = new_weight
+    else:
+        print(f"Warning: Key '{actual_key}' not found in checkpoint. Skipping surgery.")
+
+    # --- Loading Logic ---
+    # We must ensure the state_dict keys match the model's expectation.
+    # If the checkpoint has 'module.' but model doesn't (or vice versa), we must fix it.
+    
+    final_state_dict = {}
+    for k, v in state_dict.items():
+        # Normalize key: strip 'module.' if it exists
+        clean_key = k[7:] if k.startswith("module.") else k
+        
+        # Add 'module.' back ONLY if the target model needs it
+        if is_model_ddp:
+            final_key = f"module.{clean_key}"
+        else:
+            final_key = clean_key
+            
+        final_state_dict[final_key] = v
+
+    # Load into model
+    # strict=True ensures we didn't mess up the keys
+    model.load_state_dict(final_state_dict, strict=True)
+    
+    return model
+
+def fine_tuning_modulate(model, lr=0.001):
+    # Call after model = DiT(config)... and loading weights...
+    # Returns Optimizer!
+    
+    # --- DDP ADAPTATION ---
+    # If wrapped in DDP, we need to access attributes via 'model.module'
+    # If not wrapped, we use 'model' directly.
+    if hasattr(model, "module"):
+        actual_model = model.module
+    else:
+        actual_model = model
+    # ----------------------
+
+    # Freeze everything first
+    # Note: iterating model.parameters() works for both DDP and standard models
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Unfreeze the Gap Embedder
+    # Use 'actual_model' to access specific sub-modules safely
+    if hasattr(actual_model, "gap_embedder"):
+        for param in actual_model.gap_embedder.parameters():
+            param.requires_grad = True
+    else:
+        print("Warning: 'gap_embedder' not found in model.")
+
+    # Unfreeze the Condition Fuser
+    if hasattr(actual_model, "condition_fuser"):
+        for param in actual_model.condition_fuser.parameters():
+            param.requires_grad = True
+    else:
+        print("Warning: 'condition_fuser' not found in model.")
+
+    # Unfreeze adaLN Modulation
+    # We use actual_model.named_parameters() to avoid "module." prefixes in names,
+    # though strict string matching "adaLN_modulation" would usually work either way.
+    for name, param in actual_model.named_parameters():
+        if "adaLN_modulation" in name:
+            param.requires_grad = True
+
+    # Count parameters
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Fine-tuning {trainable_params} / {total_params} parameters.")
+
+    # Create optimizer ONLY for trainable parameters
+    # The filter function works perfectly on the DDP wrapper or the inner model
+    optimizer = optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()), 
+        lr=lr
+    )
+    
+    return optimizer
+
 def train(gpu, opt, output_dir, noises_init):
     debug = False
     set_seed(opt)
@@ -127,13 +254,32 @@ def train(gpu, opt, output_dir, noises_init):
             num_heads=8,
             mlp_ratio=4,
             use_long_skip=True,
-            final_conv=False,
         )
         model = DiT(DiT_config)
     else:
         print(f"Model {opt.model_name} not implemented or not included in this script")
     
     
+    #Load model checkpoint and define optimizer
+    if opt.model_ckpt != '':
+        if opt.fine_tuning:
+            model = load_checkpoint_with_gap_surgery(model, opt.model_ckpt, new_gap_classes=opt.gap_classes) 
+            optimizer = fine_tuning_modulate(model, lr= opt.lr*0.1)
+        else:
+            ckpt = torch.load(opt.model_ckpt)
+            model.load_state_dict(ckpt['model_state'])
+            #optimizer.load_state_dict(ckpt['optimizer_state'])
+            optimizer= optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
+            #if 'scaler_state' in ckpt: 
+            #    scaler.load_state_dict(ckpt['scaler_state'])
+    else:
+        optimizer= optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
+
+    if opt.model_ckpt != '':
+        start_epoch = torch.load(opt.model_ckpt)['epoch'] + 1
+    else:
+        start_epoch = 0
+
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
         def _transform_(m):
             return nn.parallel.DistributedDataParallel(
@@ -161,23 +307,9 @@ def train(gpu, opt, output_dir, noises_init):
     if should_diag:
         logger.info(opt)
 
-    optimizer= optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
-
-    lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
-
     #scaler = GradScaler(enabled=True)
 
-    if opt.model != '':
-        ckpt = torch.load(opt.model)
-        model.load_state_dict(ckpt['model_state'])
-        #optimizer.load_state_dict(ckpt['optimizer_state'])
-        #if 'scaler_state' in ckpt: 
-        #    scaler.load_state_dict(ckpt['scaler_state'])
-
-    if opt.model != '':
-        start_epoch = torch.load(opt.model)['epoch'] + 1
-    else:
-        start_epoch = 0
+    lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
 
     # def new_x_chain(x, num_chain):
     #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
@@ -216,7 +348,6 @@ def train(gpu, opt, output_dir, noises_init):
                         x, mask, int_energy, y, gap_pid, idx = data
                         gap_pid = gap_pid.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
                         y = y.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
-                        
                         # x_pc = x[:,:,:3]
                         # outf_syn = f"/global/homes/c/ccardona/PSF"
                         # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
@@ -417,7 +548,8 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/w_sim/')
+    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/')
     parser.add_argument('--category', default='all', help='category of dataset')
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
@@ -428,7 +560,7 @@ def parse_args():
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=1700)
     parser.add_argument("--num_classes", type=int, default=0, help=("Number of primary particles used in simulated data"),)
-    parser.add_argument("--gap_classes", type=int, default=0, help=("Number of calorimeter materials used in simulated data"),)
+    parser.add_argument("--gap_classes", type=int, default=3, help=("Number of calorimeter materials used in simulated data"),) 
     
     '''model'''
     parser.add_argument("--model_name", type=str, default="calopodit", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
@@ -463,7 +595,7 @@ def parse_args():
     parser.add_argument('--grad_clip', type=float, default=1.0, help='weight decay for EBM')
     parser.add_argument('--lr_gamma', type=float, default=0.998, help='lr decay for EBM')
 
-    parser.add_argument('--model', default='', help="path to model (to continue training)")
+    parser.add_argument('--model_ckpt', default='', help="path to model checkpoint (to continue training)")
 
 
     '''distributed'''
@@ -493,6 +625,8 @@ def parse_args():
 
     '''profiling'''
     parser.add_argument('--enable_profiling', action='store_true', help='Enable profiling during training.')
+    '''fine tuning'''
+    parser.add_argument('--fine_tuning', action='store_true', help='Enable fine tuning training.')
 
     opt = parser.parse_args()
 

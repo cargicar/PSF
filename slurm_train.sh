@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=train_flow_g4
 #SBATCH --nodes=1
-#SBATCH --time=10:00:00
+#SBATCH --time=4:00:00
 #SBATCH --constraint=gpu
 #SBATCH --gpus=4
 #SBATH --mem=16GB

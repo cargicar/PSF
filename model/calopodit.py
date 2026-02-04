@@ -57,48 +57,33 @@ from dataclasses import dataclass, asdict
 class NativeAttention(nn.Module):
     def __init__(self, dim, num_heads, qkv_bias=True, attn_drop=0., proj_drop=0.):
         super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
+        self.mha = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=attn_drop,
+            bias=qkv_bias,
+            batch_first=True
+        )
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x, key_padding_mask=None):
-        B, N, C = x.shape
-        # Shape: (B, N, 3, Heads, Head_Dim) -> (3, B, Heads, N, Head_Dim)
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)
-
-        # Handle Mask for SDPA
-        # SDPA expects an attention mask of shape (B, Heads, Target_Seq, Source_Seq)
-        # OR (B, 1, 1, Source_Seq) for key padding.
-        attn_mask = None
-        if key_padding_mask is not None:
-            # key_padding_mask is Boolean: True=Ignore, False=Keep
-            # We must reshape it to (B, 1, 1, N) so it broadcasts over Heads and Query-positions
-            attn_mask = key_padding_mask.view(B, 1, 1, N)
-            
-            # SDPA with boolean mask: True means "Mask out / Ignore" (Newer PyTorch versions)
-            # Ensure consistency. If using older PyTorch < 2.4, you might need to cast to float and use -inf.
-            # Assuming PyTorch 2.0+:
-            # We expand to full matrix to ensure compatibility
-            attn_mask = attn_mask.expand(-1, self.num_heads, N, -1)
-
-        # This line triggers FlashAttention if available
-        x = F.scaled_dot_product_attention(
-            q, k, v, 
-            attn_mask=attn_mask,
-            dropout_p=self.attn_drop.p if self.training else 0.0
+    def forward(self, x, context=None, key_padding_mask=None):
+        """
+        x: (Batch, Points, Dim) -> Query
+        context: (Batch, Seq_Len, Dim) -> Key/Value. If None, performs Self-Attention.
+        """
+        # If context is provided, use it for Key/Value (Cross-Attn). 
+        # Otherwise use x (Self-Attn).
+        kv = context if context is not None else x
+        
+        out, _ = self.mha(
+            query=x, 
+            key=kv, 
+            value=kv, 
+            key_padding_mask=key_padding_mask, 
+            need_weights=False 
         )
-
-        x = x.transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
+        
+        return self.proj_drop(out)
     
 #Replaces timms.Mlp
 class GluMlp(nn.Module):
@@ -438,47 +423,64 @@ class PointEmbedder(nn.Module):
 
 
 class DiTBlock(nn.Module):
-    """
-    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
-    """
-
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, skip=False):
         super().__init__()
+        # 1. Self-Attention Block (Time-Modulated)
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        #self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True)
         self.attn = NativeAttention(hidden_size, num_heads=num_heads, qkv_bias=True)
+        
+        # 2. Cross-Attention Block (New!)
+        # We use a standard LayerNorm here for simplicity
+        self.norm_cross = nn.LayerNorm(hidden_size)
+        self.cross_attn = NativeAttention(hidden_size, num_heads=num_heads, qkv_bias=True)
+        
+        # 3. MLP Block (Time-Modulated)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        approx_gelu = lambda: nn.GELU(approximate="tanh")
-        # Replace self.mlp = Mlp(...) 
+        
+        # SwiGLU MLP
         self.mlp = GluMlp(
             in_features=hidden_size,
             hidden_features=int(hidden_size * mlp_ratio),
-            act_layer=nn.SiLU, # SiLU is standard for SwiGLU
+            act_layer=nn.SiLU,
             drop=0,
         )
+        
+        # AdaLN Modulation (Still driven by Time)
+        # Predicts 6 parameters: (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
+        
         self.skip_linear = nn.Linear(2 * hidden_size, hidden_size) if skip else None
 
-    def forward(self, x, c, key_padding_mask = None, x_skip=None):
+    def forward(self, x, c, context, key_padding_mask=None, x_skip=None):
+        """
+        c: Time embedding (for AdaLN)
+        context: Sequence of condition embeddings [y, gap, energy] (for Cross-Attn)
+        """
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.adaLN_modulation(c).chunk(6, dim=1)
         )
 
         if self.skip_linear is not None:
             x = self.skip_linear(torch.cat([x, x_skip], dim=-1))
-        
+
+        # 1. Self-Attention (Modulated by Time)
         x = x + gate_msa.unsqueeze(1) * self.attn(
             modulate(self.norm1(x), shift_msa, scale_msa),
             key_padding_mask=key_padding_mask 
-        )        
+        )
+        
+        # 2. Cross-Attention (Conditioned on Context)
+        # Note: We don't use key_padding_mask here because context usually doesn't need padding masking
+        x = x + self.cross_attn(self.norm_cross(x), context=context)
+        
+        # 3. MLP (Modulated by Time)
         x = x + gate_mlp.unsqueeze(1) * self.mlp(
             modulate(self.norm2(x), shift_mlp, scale_mlp)
         )
+        
         return x
-
 
 class FinalLayer(nn.Module):
     """
@@ -597,17 +599,6 @@ class DiT(nn.Module):
         if config.energy_cond:
             cond_dim += config.hidden_size
 
-        # If we have more than just time, we need a fuser
-        if cond_dim > config.hidden_size:
-            self.condition_fuser = nn.Sequential(
-                nn.Linear(cond_dim, config.hidden_size),
-                nn.SiLU(),
-                nn.Linear(config.hidden_size, config.hidden_size)
-            )
-        else:
-            self.condition_fuser = nn.Identity()
-
-
         self.in_blocks = nn.ModuleList(
             [
                 DiTBlock(
@@ -684,12 +675,6 @@ class DiT(nn.Module):
             nn.init.zeros_(self.e_embedder.null_embedding)
             #nn.init.normal_(self.e_embedder.null_embedding, std=0.02)
 
-        # Initialize conditional fuser weights closer to identity to not break training stability start
-        if isinstance(self.condition_fuser, nn.Sequential):
-            for layer in self.condition_fuser:
-                if isinstance(layer, nn.Linear):
-                    nn.init.xavier_uniform_(layer.weight)
-                    nn.init.zeros_(layer.bias)
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
@@ -765,21 +750,34 @@ class DiT(nn.Module):
         x = x_features + pos_emb 
         x = self.embed_norm(x)
 
-        # 3. Conditional Embeddings
-        t_emb = self.t_embedder(t)
-        cond_list = [t_emb]
+        # --- CONDITIONING LOGIC ---
+        # Time (c) drives the AdaLN (Noise Level)
+        c = self.t_embedder(t) 
 
-        if hasattr(self, "y_embedder"):
-            cond_list.append(self.y_embedder(y, self.training, force_drop_ids))
-        if hasattr(self, "gap_embedder"):
-            cond_list.append(self.gap_embedder(gap, self.training, force_drop_ids))
-        if hasattr(self, "e_embedder"):
-            cond_list.append(self.e_embedder(energy, self.training, force_drop_ids))
-
-        # Fuse
-        c = self.condition_fuser(torch.cat(cond_list, dim=-1))
-
-        # 4. Transformer Backbone with Checkpointing
+        # 2. Conditions (y, gap, energy) become the Context Sequence
+        
+        # We collect them into a list
+        context_tokens = []
+        
+        if hasattr(self, "y_embedder") and y is not None:
+            y_emb = self.y_embedder(y, self.training, force_drop_ids)
+            context_tokens.append(y_emb.unsqueeze(1)) # <--- HERE
+            
+        if hasattr(self, "gap_embedder") and gap is not None:
+            gap_emb = self.gap_embedder(gap, self.training, force_drop_ids)
+            context_tokens.append(gap_emb.unsqueeze(1)) # <--- HERE
+            
+        if hasattr(self, "e_embedder") and energy is not None:
+            energy_emb = self.e_embedder(energy, self.training, force_drop_ids)
+            context_tokens.append(energy_emb.unsqueeze(1)) # <--- HERE
+            
+        # Stack them along sequence dim: (B, Num_Conds, Hidden)
+        if len(context_tokens) > 0:
+            context = torch.cat(context_tokens, dim=1) 
+        else:
+            # Fallback: create a zero context (Batch, 1, Hidden)
+            context = torch.zeros(x.shape[0], 1, self.config.hidden_size, device=x.device)
+        #  -----Transformer Backbone with Checkpointing -----
         skips = []
         for block in self.in_blocks:
             # Pass key_padding_mask instead of raw mask

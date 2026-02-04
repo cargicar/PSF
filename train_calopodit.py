@@ -22,6 +22,8 @@ import torch.profiler
 from functools import partial
 
 #torch.autograd.set_detect_anomaly(True)
+#TODO list to improve fidelity:
+#### Add train_utils.enforce_energy_conservation to the loss
 
 @contextmanager
 def profile(enable_profiling, record_shapes=True, tensor_board=True, output_dir="profiling"):
@@ -556,9 +558,9 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')# Training
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/')# Training
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/') #Finetuning
-    parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_2_sample_w.pth') #Reflow
+    #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_2_sample_w.pth') #Reflow
     parser.add_argument('--category', default='all', help='category of dataset')
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
@@ -569,7 +571,7 @@ def parse_args():
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=1700)
     parser.add_argument("--num_classes", type=int, default=0, help=("Number of primary particles used in simulated data"),)
-    parser.add_argument("--gap_classes", type=int, default=1, help=("Number of calorimeter materials used in simulated data"),) 
+    parser.add_argument("--gap_classes", type=int, default=2, help=("Number of calorimeter materials used in simulated data"),) 
     
     '''model'''
     parser.add_argument("--model_name", type=str, default="calopodit", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")

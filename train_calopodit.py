@@ -196,7 +196,7 @@ def fine_tuning_modulate(model, lr=0.001):
     
     return optimizer
 
-def train(gpu, opt, output_dir, noises_init):
+def train(gpu, opt, output_dir):
     debug = False
     set_seed(opt)
     logger = setup_logging(output_dir)
@@ -225,8 +225,11 @@ def train(gpu, opt, output_dir, noises_init):
         opt.diagIter = int(opt.diagIter / opt.ngpus_per_node)
         opt.vizIter = int(opt.vizIter / opt.ngpus_per_node)
 
-    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
-    dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=partial(pad_collate_fn, max_particles= train_dataset.max_particles))
+    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname, reflow= not opt.is_independent_coupling)
+    if opt.is_independent_coupling:
+        dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=partial(pad_collate_fn, max_particles= train_dataset.max_particles))
+    else:
+        dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None)
 
 
     '''
@@ -345,16 +348,19 @@ def train(gpu, opt, output_dir, noises_init):
                 
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
-                        x, mask, int_energy, y, gap_pid, idx = data
-                        gap_pid = gap_pid.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
-                        y = y.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
-                        # x_pc = x[:,:,:3]
-                        # outf_syn = f"/global/homes/c/ccardona/PSF"
-                        # visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
-                        #                        x_pc, None, None,
-                        #                        None)
-                        if opt.model_name == "pvcnn2":
-                            x = x.transpose(1,2)
+                        if opt.is_independent_coupling:
+                            x, mask, int_energy, y, gap_pid, idx = data
+                            gap_pid = gap_pid.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
+                            y = y.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
+                        else:
+                            print(f"independent coupling is reflow={opt.is_independent_coupling}")
+                            #torch.save([x.cpu(), pts.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path)  
+                            x, x_0, int_energy, gap_pid, idx = data
+                            gap_pid = gap_pid.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
+                            #y = y.long()
+
+                    if opt.model_name == "pvcnn2":
+                        x = x.transpose(1,2)
                         #noises_batch = noises_init[list(idx)].transpose(1,2)
                     elif opt.dataname == 'shapenet':
                         x = data['train_points']
@@ -380,7 +386,8 @@ def train(gpu, opt, output_dir, noises_init):
                     rectified_flow.device = x.device      
                     optimizer.zero_grad()
                     #with autocast(enabled=True):
-                    x_0 = rectified_flow.sample_source_distribution(x.shape[0])
+                    if opt.is_independent_coupling:
+                        x_0 = rectified_flow.sample_source_distribution(x.shape[0])
                     if opt.model_name == "pvcnn2":
                         x_0 = x_0.transpose(1,2)
                     t = rectified_flow.sample_train_time(x.shape[0])
@@ -525,19 +532,20 @@ def main():
     output_dir = get_output_dir(dir_id, exp_id)
     copy_source(__file__, output_dir)
 
-    ''' workaround '''
-    train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name =opt.dataname)
-    noises_init = torch.randn(len(train_dataset), opt.npoints, opt.nc)
-    
+    # ''' workaround '''
+    # if opt.is_independent_coupling:
+    #     train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name =opt.dataname)
+    #     noises_init = torch.randn(len(train_dataset), opt.npoints, opt.nc)
+        
     if opt.dist_url == "env://" and opt.world_size == -1:
         opt.world_size = int(os.environ["WORLD_SIZE"])
 
     if opt.distribution_type == 'multi':
         opt.ngpus_per_node = torch.cuda.device_count()
         opt.world_size = opt.ngpus_per_node * opt.world_size
-        mp.spawn(train, nprocs=opt.ngpus_per_node, args=(opt, output_dir, noises_init))
+        mp.spawn(train, nprocs=opt.ngpus_per_node, args=(opt, output_dir))
     else:
-        train(opt.gpu, opt, output_dir, noises_init)
+        train(opt.gpu, opt, output_dir)
 
 
 
@@ -548,8 +556,9 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/')
+    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')# Training
+    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/') #Finetuning
+    parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_2_sample_w.pth') #Reflow
     parser.add_argument('--category', default='all', help='category of dataset')
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
@@ -560,7 +569,7 @@ def parse_args():
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=1700)
     parser.add_argument("--num_classes", type=int, default=0, help=("Number of primary particles used in simulated data"),)
-    parser.add_argument("--gap_classes", type=int, default=3, help=("Number of calorimeter materials used in simulated data"),) 
+    parser.add_argument("--gap_classes", type=int, default=1, help=("Number of calorimeter materials used in simulated data"),) 
     
     '''model'''
     parser.add_argument("--model_name", type=str, default="calopodit", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")
@@ -572,7 +581,13 @@ def parse_args():
     '''Flow'''
     parser.add_argument("--interp", type=str, default="straight", help="Interpolation method for the rectified flow. Choose between ['straight', 'slerp', 'ddim'].")
     parser.add_argument("--source_distribution", type=str, default="normal", help="Distribution of the source samples. Choose between ['normal'].")
-    parser.add_argument("--is_independent_coupling", type=bool, default=True,help="Whether training 1-Rectified Flow")
+    #parser.add_argument("--is_independent_coupling", type=bool, default= True, help="Whether training 1-Rectified Flow")
+    parser.add_argument("--no_independent_coupling", #NOTE Reflow
+                    dest="is_independent_coupling", 
+                    action="store_false", 
+                    help="Disable independent coupling")
+    parser.set_defaults(is_independent_coupling=True)
+
     parser.add_argument("--train_time_distribution", type=str, default="uniform", help="Distribution of the training time samples. Choose between ['uniform', 'lognormal', 'u_shaped'].")
     parser.add_argument("--train_time_weight", type=str, default="uniform", help="Weighting of the training time samples. Choose between ['uniform'].")
     parser.add_argument("--criterion", type=str, default="mse", help="Criterion for the rectified flow. Choose between ['mse', 'l1', 'lpips'].")

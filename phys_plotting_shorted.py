@@ -3,6 +3,8 @@ import json
 import math
 import h5py
 import os
+from datetime import datetime
+
 import torch
 import awkward as ak
 import matplotlib as mpl
@@ -29,6 +31,8 @@ from metrics.physics.plotting_utils import (
     write_distances_to_json,
     plot_ratios
 )
+
+from utils.train_utils import enforce_energy_conservation as enc
 
 def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = None, material: str = None, **kwargs):
     """Plots the features of multiple constituent or shower sets.
@@ -397,9 +401,16 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     return fig        
 
 # This function take a list: file_path= [(original hdf5 file dataset), (generated samples file: ak, pth, or another)]
-def read_generated(file_path, material_list=["G4_Ta","G4_W",],num_showers=-1,material="G4_Ta", use_mask = False):
 
-
+def read_generated(file_path, 
+                   material_list=["G4_Ta","G4_W",], 
+                   num_showers=-1, 
+                   material="G4_W", 
+                   use_mask=False, 
+                   energy_threshold=0.0,
+                   enforce_conservation = True):
+    material_dict = {"G4_W" : 0, "G4_Ta": 1, "G4_Pb" : 2 }
+    #if pth gen_tensor = [x.cpu(), pts.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()] 
     gen_dict = {
         "x": [],
         "y": [],
@@ -412,69 +423,117 @@ def read_generated(file_path, material_list=["G4_Ta","G4_W",],num_showers=-1,mat
         "z": [],
         "energy": [],
     }
+
     # Read it back later
     if "parquet" in file_path[1]:
         loaded_showers = ak.from_parquet(file_path[1])
     elif "pth" in file_path[1]:
-        gen_tensor = torch.load(file_path[1], map_location= 'cpu')
-        if isinstance(gen_tensor, list):
-            _ , gen_tensor, mask = gen_tensor
+        data = torch.load(file_path[1], map_location='cpu')
+        if isinstance(data, list):
+            _ , gen_tensor, mask, int_energy, gap_pid = data
     else:
         print(f"Array or Tensor format not implemented yet")
-    
-    with h5py.File(file_path[0],"r") as h5file:
-        #showers = h5file['showers'][()]
-        showers_idx = h5file.keys()
+        return None, None # Safety return
+
+    with h5py.File(file_path[0], "r") as h5file:
+        showers_idx = list(h5file.keys()) # Convert to list for safer indexing
         if num_showers == -1:
             num_showers = len(showers_idx)
-        #FIXME temporal 
-        #num_showers = gen_tensor.shape[0]
-        for i,idx in enumerate(showers_idx):
+        
+        # Determine actual loop limit based on available tensor size if applicable
+        # (Optional safety check if gen_tensor is smaller than num_showers)
+        if "pth" in file_path[1] and hasattr(gen_tensor, 'shape'):
+             num_showers = min(num_showers, gen_tensor.shape[0])
+        n=0
+        for i, idx in enumerate(showers_idx):
             if i >= num_showers:
                 break
-            #init_E,spatial,energy,spatial_truth,energy_truth,material_index = shower
+            
             shower = h5file[idx]
-            E = shower.attrs['initial_energy']
-            x, y, z= shower['indices'][()].T
+            # E = shower.attrs['initial_energy']
+            x, y, z = shower['indices'][()].T
             energy = shower['values'][()]
             mat = shower['material'][()]
             
             if i % 5000 == 0 or i == num_showers:
                 print(f"Shower #: {i}/{num_showers}, Material: {mat}")
 
-            if mat.decode('utf-8') != material:
-                continue
-            if "pth" in file_path[1]:
-                #if use_mask: gen_tensor = gen_tensor[mask.bool()]
-                if use_mask: gen_tensor = gen_tensor * mask.unsqueeze(-1)
-                if gen_tensor.shape[1] == 4:
-                    # 0:x, 1:y, 2:z, 3:E, 4:hit_prob
-                    xg, yg, zg, eg = gen_tensor[i] 
-                else:
-                    xg, yg, zg, eg = gen_tensor[i].T     
-                
-                    gen_dict["z"].append(zg)
-                    gen_dict["x"].append(xg)
-                    gen_dict["y"].append(yg)
-                    gen_dict["energy"].append(eg)
+            # Decode material if needed
+            mat_decoded = mat.decode('utf-8') if hasattr(mat, 'decode') else str(mat)
 
-            data_dict["z"].append(z)
-            data_dict["x"].append(x)
+            if mat_decoded != material:
+                continue
+            
+            if "pth" in file_path[1]:
+                # Apply global mask if requested
+                if use_mask: 
+                    # Note: Ensure shapes align for this multiplication
+                    gen_tensor_i = gen_tensor[i] * mask.unsqueeze(-1)
+                else:
+                    gen_tensor_i = gen_tensor[i]
+                if gap_pid[i] != material_dict[material]:
+                    n+=1
+                    #print(f"Material mistmatch: gap :{gap_pid[i]}, material dict {material_dict[material]}")
+                    continue
+                # Unpack based on shape [Batch, Channels, Points] vs [Batch, Points, Channels]
+                if gen_tensor_i.shape[0] == 4 and len(gen_tensor_i.shape) == 2: 
+                    # Case: [4, npoints]
+                    xg, yg, zg, eg = gen_tensor_i
+                elif gen_tensor_i.shape[-1] == 4:
+                     # Case: [npoints, 4] -> Transpose to unpack
+                    xg, yg, zg, eg = gen_tensor_i.T
+                else:
+                    # Fallback or specific user case logic
+                    xg, yg, zg, eg = gen_tensor_i.T
+                
+                # --- FILTER LOGIC STARTS HERE ---
+                # Create a boolean mask for points above the threshold
+                valid_mask = eg > energy_threshold
+                
+                # Apply the mask to all components
+                xg = xg[valid_mask]
+                yg = yg[valid_mask]
+                zg = zg[valid_mask]
+                eg = eg[valid_mask]
+                # --- FILTER LOGIC ENDS HERE ---
+
+                # Enforce energy conservation
+                if enforce_conservation:
+                    # 1. Calculate the current sum of the generated shower
+                    current_sum = torch.sum(eg)
+                    
+                    # 2. Get the target sum from the conditional input (int_energy)
+                    # Ensure we handle shape (1,) or scalar
+                    target_sum = np.sum(energy)
+                    
+                    # 3. Scale if the shower is not empty
+                    if current_sum > 1e-9:
+                        scale_factor = target_sum / current_sum
+                        eg = eg * scale_factor
+                
+                gen_dict["x"].append(zg)
+                gen_dict["z"].append(xg)
+                gen_dict["y"].append(yg)
+                gen_dict["energy"].append(eg)
+
+            data_dict["x"].append(z)
+            data_dict["z"].append(x)
             data_dict["y"].append(y)
             data_dict["energy"].append(energy)
-            # data_dict_truth["z"].append(xt)
-            # data_dict_truth["x"].append(yt)
-            # data_dict_truth["y"].append(zt)
-            # data_dict_truth["energy"].append(Et)
-        if "pth" in file_path[1]:
-            ak_array = ak.Array(gen_dict)
-        elif "parquet" in file_path[1]:
-            ak_array = loaded_showers
-        else:
-            ak_array = None
-        ak_array_truth = ak.Array(data_dict)
+        print(f"Total Material mistmatch: {n}")
+
+    if "pth" in file_path[1]:
+        # Convert list of tensors to awkward array
+        # ak.Array can handle variable length lists created by the filtering
+        ak_array = ak.Array(gen_dict)
+    elif "parquet" in file_path[1]:
+        ak_array = loaded_showers
+    else:
+        ak_array = None
         
-        return ak_array, ak_array_truth
+    ak_array_truth = ak.Array(data_dict)
+    
+    return ak_array, ak_array_truth
 
 
 # read_generated with hit_prob
@@ -545,7 +604,8 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
     return ak_array, ak_array_truth
 
 def make_plots(file_paths: list[str], #list containig file paths for simulation and generated data
-                material_list=["G4_Ta"],
+                material_list=["G4_Ta","G4_W","G4_Pb"],
+                material = "G4_W",
                 num_showers=-1,
                 title= None):
     #filepath[0] : simulation data
@@ -553,35 +613,41 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
     #os.makedirs("Plots",exist_ok=True)
     #filename = file_path.split("/")[-1][:-3]
 
-    for material in material_list:
-        if isinstance(file_paths, list):
-            generated_features, ground_truth_features = read_generated(file_paths, material_list, num_showers, material)
-        else:
-            generated_features, ground_truth_features = read_generated_pth(file_paths, num_showers)
-        fig = plot_paper_plots(
-            [ground_truth_features, generated_features],
-            labels=["Ground Truth", "Generated"],
-            colors=["lightgrey", "cornflowerblue"], material=material
-        )
+    #for material in material_list:
+    if isinstance(file_paths, list):
+        generated_features, ground_truth_features = read_generated(file_paths, material_list, num_showers, material)
+    else:
+        generated_features, ground_truth_features = read_generated_pth(file_paths, num_showers)
+    fig = plot_paper_plots(
+        [ground_truth_features, generated_features],
+        labels=["Ground Truth", "Generated"],
+        colors=["lightgrey", "cornflowerblue"], material=material
+    )
 
-        #fig.savefig(f"Plots/{filename}_{material}.pdf", dpi=300)
-        #fig.savefig(f"file_paths[0][-4]{title}", dpi=300)
-        fig.savefig(f"{title}", dpi=300)
+    #fig.savefig(f"Plots/{filename}_{material}.pdf", dpi=300)
+    #fig.savefig(f"file_paths[0][-4]{title}", dpi=300)
+    fig.savefig(f"{title}", dpi=300)
 
 if __name__ == "__main__":
+    material = "G4_W"
+    date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     import argparse
     parser = argparse.ArgumentParser(description="Plot generated showers vs ground truth")
     #parser.add_argument("--file_path", type=str, required=True, help="Path to the HDF5 file containing generated showers")
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/test/ta_sim_test/photon-shower-76_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
-    #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Jan_17.pth') # For the case when we can to read original and generated from the same pth file
-    parser.add_argument('--title', default='phys_metrics_calopodit_feb_1_class_ta_w_ta_sample.png')
-    #parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/logs/example_backbone/runs/2026-01-28_17-10-16_nid001133_InvolvedIrredentist/gen_samples/showers.parquet')
-    parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_1_train_ta_w.pth')
+    if material == "G4_W":
+        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/w_sim/photon-shower-16_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
+    if material == "G4_Ta":
+        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/ta_sim/photon-shower-16_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
+        #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Jan_17.pth') # For the case when we can to read original and generated from the same pth file
+    parser.add_argument('--title', default=f'phys_metrics_calopodit_{date_str}_{material}')
+    #parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/logs/example_backbone/runs/2026-02-02_pretrained_from_paper/gen_samples/showers.parquet')
+    parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_3_sample_w.pth')
     #parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-06_clopodit_idl_mask/syn/combined_photon_samples.pth')
     parser.add_argument("--num_showers", type=int, default=-1, help="Number of showers to process (-1 for all)")
     args = parser.parse_args()
+
     if 'pth' in args.dataroot:
         filepaths = args.dataroot
     else:
         filepaths = [args.dataroot, args.genroot]
-    make_plots(filepaths, num_showers=args.num_showers, title = args.title)
+    make_plots(filepaths, num_showers=args.num_showers, title = args.title, material= material)

@@ -40,7 +40,7 @@ def get_betas(schedule_type, b_start, b_end, time_num):
     return betas
 
 
-def get_dataset(dataroot, npoints,category, name='shapenet'):
+def get_dataset(dataroot, npoints,category, name='shapenet', reflow = False):
     if name == 'shapenet':
         train_dataset = ShapeNet15kPointClouds(root_dir=dataroot,
             categories=[category], split='train',
@@ -92,7 +92,10 @@ def get_dataset(dataroot, npoints,category, name='shapenet'):
         test_dataset = None
         #te_dataset = LazyPklDataset(os.path.join(dataroot, 'val'), transform
     elif name == 'idl':
-        dataset = IDLDataset(dataroot)#, max_seq_length=npoints, ordering='spatial', material_list=["G4_W", "G4_Ta", "G4_Pb"], inference_mode=False)
+        if reflow:
+            dataset = IDLDataset(dataroot, reflow = True)
+        else:
+            dataset = IDLDataset(dataroot)#, max_seq_length=npoints, ordering='spatial', material_list=["G4_W", "G4_Ta", "G4_Pb"], inference_mode=False)
         train_dataset = dataset
         test_dataset = None
     return train_dataset, test_dataset
@@ -292,6 +295,49 @@ class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
             loss = loss + (self.energy_weight * physics_loss)
 
         return loss
+    
+def enforce_energy_conservation(samples, target, energy_idx=-1, eps=1e-6):
+    """
+    Scales the energy channel of generated points so their sum matches the target energy.
+    
+    Args:
+        samples (torch.Tensor): (Batch, Points, Channels).
+        target_energy (torch.Tensor): (Batch,). The conditioning energy (incident or sum).
+        energy_idx (int): Index of the energy channel (usually -1 or 3).
+        eps (float): Small value to prevent division by zero.
+        
+    Returns:
+        torch.Tensor: The corrected samples.
+    """
+    # 1. Clone to avoid in-place modification errors
+    samples = samples.clone()
+    target = target.clone()
+    # 2. Extract generated energy channel
+    # relu ensures we don't sum negative noise, though your model should predict > 0
+    gen_energies = torch.nn.functional.relu(samples[..., energy_idx]) 
+    target_energies = torch.nn.functional.relu(target[..., energy_idx]) 
+    
+    # 3. Calculate the sum per shower
+    gen_sums = torch.sum(gen_energies, dim=1) # Shape: (Batch,)
+    target_sums = torch.sum(target_energies, dim=1) # Shape: (Batch,)
+    # 4. Calculate Scaling Factor (Target / Generated_Sum)
+    # Ensure we don't divide by zero
+    gen_sums = torch.clamp(gen_sums, min=eps)
+    
+    # target_energy might need to be reshaped to match gen_sums
+    # if target_energy.dim() > 1:
+    #     target_energy = target_energy.view(-1)
+        
+    scale_factors = target_sums / gen_sums # Shape: (Batch,)
+    
+    # 5. Apply Scaling
+    # Reshape for broadcasting: (Batch, 1) to multiply across (Batch, Points)
+    scale_factors = scale_factors.unsqueeze(1)
+    
+    # Apply ONLY to the energy channel
+    samples[..., energy_idx] = samples[..., energy_idx] * scale_factors
+    
+    return samples
 
 def plot_4d_reconstruction(original, reconstructed, savepath=".reconstructed.png", index=0):
     # original/reconstructed: [B, 4, N]

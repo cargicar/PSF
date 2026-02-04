@@ -210,8 +210,7 @@ def test(gpu, opt, output_dir, noises_init):
 
     # CFG Scale (Usually 2.0 to 7.0 for diffusion/flow)
     # 1.0 = No guidance (standard), 4.0 = Strong guidanc
-    #TODO create args for this target and cfg scale
-    target_class_idx = 2
+    #TODO create args for cfg scale
     cfg_scale = 4.0
     masks =[]
     xs = []
@@ -220,8 +219,8 @@ def test(gpu, opt, output_dir, noises_init):
     model.eval()
     with torch.no_grad():
         for i, data in enumerate(dataloader):
-            if i > 80:
-                break
+            if i < 73:
+                continue
             if opt.dataname == 'g4' or opt.dataname == 'idl':
                 x, mask, int_energy, y, gap_pid, idx = data
             elif opt.dataname == 'shapenet':
@@ -231,8 +230,8 @@ def test(gpu, opt, output_dir, noises_init):
                 #noises_batch = noises_init[data['idx']].transpose(1,2)
             
             #Chose class to generate
-            if gap_pid[0].item() != target_class_idx:
-                continue
+            # if gap_pid[0].item() != target_class_idx:
+            #     continue
             
             if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
                 x = x.cuda(gpu,  non_blocking=True)
@@ -286,9 +285,9 @@ def test(gpu, opt, output_dir, noises_init):
                 trajectory = traj1.trajectories
                 print(f"Rank {gpu}: Generating batch {i}")
                 #if gpu == 0:
-                save_path = f'{opt.pthsave}_calopodit_gen_gapclasse_Pb_Feb_1_rank_{gpu}_batch_{i}.pth'
+                save_path = f'{opt.pthsave}_calopodit_gen_gapclasses_sample_w_Feb_1_rank_{gpu}_batch_{i}.pth'
                 #torch.save([final_xs.cpu(), final_recons.cpu(), final_masks.cpu(), final_gaps.cpu()], save_path)  
-                torch.save([x.cpu(), pts.cpu(), mask.cpu()], save_path)  
+                torch.save([x.cpu(), pts.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path)  
                 print(f"Batch data saved to {save_path}")
                 
                 # Plotting (only needs to be done on master)
@@ -396,8 +395,8 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')
+    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/')
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
@@ -408,7 +407,7 @@ def parse_args():
     parser.add_argument('--nc', type=int, default=4)
     parser.add_argument('--npoints',  type=int, default=2048)
     parser.add_argument("--num_classes", type=int, default=0, help=("Number of primary particles used in simulated data"),)
-    parser.add_argument("--gap_classes", type=int, default=3, help=("Number of calorimeter materials used in simulated data"),) #All classes after finetuning
+    parser.add_argument("--gap_classes", type=int, default=2, help=("Number of calorimeter materials used in simulated data"),) #All classes after finetuning
     
     '''model'''
     parser.add_argument("--model_name", type=str, default="calopodit", help="Name of the velovity field model. Choose between ['pvcnn2', 'calopodit', 'graphcnn'].")

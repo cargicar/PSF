@@ -1,14 +1,3 @@
-import os
-from pathlib import Path
-import h5py
-from torch.utils.data import Dataset
-import numpy as np
-import torch
-from typing import List, Tuple, Literal
-import pickle
-        
-material_dict = {"G4_W" : 0, "G4_Ta": 1, "G4_Pb" : 2 }
-particle_dict = {"Photon" : 0, "electron" : 1}
 import torch
 from torch.utils.data import Dataset
 from pathlib import Path
@@ -16,6 +5,12 @@ import h5py
 import numpy as np
 import pickle
 import glob
+import torch
+from torch.utils.data import Dataset
+import numpy as np
+import h5py
+import pickle
+from pathlib import Path        
 
 material_dict = {"G4_W" : 0, "G4_Ta": 1, "G4_Pb" : 2 }
 particle_dict = {"Photon" : 0, "electron" : 1}
@@ -30,21 +25,51 @@ class LazyIDLDataset(Dataset):
         self.global_index_map = [] 
         # Cache for open file handles (HDF5) or loaded tensors (PTH)
         self.files = {} 
+        
+        # Container for global dataset statistics
+        self.stats = None 
+        self.max_particles = None
+        
         self._create_global_index_map()
 
     def _create_global_index_map(self):
         cache_path = Path(self.data_dir) / f"dataset_cache.pkl"
-        self.max_particles = 2200 #FIXME hardcoded max particles
+        
+        # --- 1. Try Loading from Cache ---
         if cache_path.exists():
             print(f"Loading dataset index from cache: {cache_path}")
             with open(cache_path, "rb") as f:
-                self.global_index_map = pickle.load(f)
+                cached_data = pickle.load(f)
+            
+            # Check if cache is the new dict format or the old list format
+            if isinstance(cached_data, dict) and 'index_map' in cached_data:
+                self.global_index_map = cached_data['index_map']
+                self.stats = cached_data.get('stats', None)
+                self.max_particles = cached_data.get('max_particles', None)
+                if self.stats:
+                    print(f"Loaded Stats -> Mean: {self.stats['mean']}, Std: {self.stats['std']}")
+                if self.max_particles:
+                    print(f"Loaded max-particles -> {self.max_particles}")
+                  
+            else:
+                # Fallback for old cache (just a list)
+                self.global_index_map = cached_data
+                self.stats = None
+                print("Warning: Old cache format found (no statistics). Delete .pkl to recompute.")
             return
 
+        # --- 2. Compute Index & Stats if not cached ---
         base_path = Path(self.data_dir)
+        
+        # Stats Accumulators (x, y, z, log_energy)
+        # Using double precision for accumulation to avoid overflow/precision loss
+        running_sum = torch.zeros(4, dtype=torch.float64)
+        running_sum_sq = torch.zeros(4, dtype=torch.float64)
+        total_points = 0
         
         if self.reflow:
             # --- Reflow (PTH) Case ---
+            #FIXME (Stats ignored so far)
             file_paths = list(base_path.rglob("*.pth"))
             if len(file_paths)>0:
                 print(f"Found {len(file_paths)} .pth files for reflow.")
@@ -53,22 +78,16 @@ class LazyIDLDataset(Dataset):
             
             for file_path in file_paths:
                 try:
-                    # We must load the file to know how many samples it has
-                    # map_location='cpu' is safer for dataloading
                     data = torch.load(file_path, map_location='cpu')
-                    
-                    # Handle both Dict and List formats
+                    # ... [Existing Reflow Logic] ...
                     if isinstance(data, dict):
-                        # Assume 'x' or 'x0' is the primary key for length
                         key = 'x' if 'x' in data else list(data.keys())[0]
                         num_particles = len(data[key])
                     elif isinstance(data, (list, tuple)):
                         num_particles = len(data[0])
                     else:
-                        print(f"Unknown format in {file_path}, skipping.")
                         continue
                         
-                    # Append (file_path, local_index) for every sample
                     for i in range(num_particles):
                         self.global_index_map.append((str(file_path), i))
                         
@@ -78,82 +97,118 @@ class LazyIDLDataset(Dataset):
         else:
             # --- Standard (H5) Case ---
             file_paths = list(base_path.rglob("*.h5")) + list(base_path.rglob("*.hdf5"))
-            self.max_particles = 2200 # FIXME hardcoded max particles
+            lengths = [] # Temporary list to find the max particles
+            print(f"Indexing {len(file_paths)} files and computing statistics...")
             
             for file_path in file_paths:
                 if "Pb_Simulation" in str(file_path):
+                    #FIXME I am hardcoding ignoring Pb_here, NOT NEEED!
                     continue
                 try:
                     with h5py.File(file_path, "r") as f:
                         for key in f.keys():
-                            # Just mapping keys, not loading data yet
                             self.global_index_map.append((str(file_path), key))
+                            
+                            # --- Compute Statistics ---
+                            # Read raw data to accumulate mean/std
+                            group = f[key]
+                            indices = group["indices"][:] # (N, 3)
+                            values = group["values"][:]   # (N, 1) or (N,)
+                            num_particles = indices.shape[0]
+                            lengths.append(num_particles)
+                            
+                            # Handle shape consistency
+                            if values.ndim == 1:
+                                values = values[:, None]
+                            
+                            # --- MODIFICATION: Log Transform Energy for Stats ---
+                            # We want stats on log(E) so the scaler works correctly.
+                            # Add epsilon 1e-6 to avoid log(0)
+                            values_log = np.log(values + 1e-6)
+                            
+                            # Stack: (N, 4) -> [x, y, z, log_energy]
+                            data_chunk = np.column_stack((indices, values_log)).astype(np.float64)
+                            data_tensor = torch.from_numpy(data_chunk)
+                            
+                            # Accumulate sums
+                            running_sum += torch.sum(data_tensor, dim=0)
+                            running_sum_sq += torch.sum(data_tensor ** 2, dim=0)
+                            total_points += data_tensor.shape[0]
+                            
                 except Exception as e:
                     print(f"Error reading {file_path}: {e}")
+            
+            # --- Finalize Statistics ---
+            if total_points > 0 and not self.reflow:
+                self.max_particles = max(lengths) if lengths else 0
+                # E[X]
+                mean = (running_sum / total_points).float()
+                # Std = sqrt( E[X^2] - (E[X])^2 )
+                mean_sq = running_sum_sq / total_points
+                std = torch.sqrt(mean_sq - mean.double()**2).float()
+                
+                # Replace tiny stds with 1.0 to avoid division by zero later
+                std = torch.where(std < 1e-6, torch.tensor(1.0), std)
+                
+                self.stats = {
+                    'mean': mean, # [x_mean, y_mean, z_mean, log_e_mean]
+                    'std': std,
+                    'total_points': total_points
+                }
+                print(f"Computed Stats (log-energy):\nMean: {mean}\nStd:  {std}")
 
-            # Cache the index map
+            # --- 3. Save to Cache ---
+            cache_payload = {
+                'index_map': self.global_index_map,
+                'stats': self.stats,
+                'max_particles': self.max_particles
+            }
+            
             with open(cache_path, "wb") as f:
-                pickle.dump(self.global_index_map, f)
+                pickle.dump(cache_payload, f)
             
             print(f"Dataset indexed. Total events: {len(self.global_index_map)}")
 
     def __len__(self):
-        """Returns the total number of individual events (showers) in the dataset."""
         return len(self.global_index_map)
 
     def __getitem__(self, idx):
-        """Retrieves a single data sample by loading the necessary file on demand."""
-        
         file_path, local_key = self.global_index_map[idx]
-        # --- REFLOW / PTH CASE ---
+        
+        # ... [Existing Reflow Logic] ...
         if self.reflow:
-            # Check if file data is already cached in memory
             if file_path not in self.files:
-                # Load and cache the tensor dictionary/list
                 self.files[file_path] = torch.load(file_path, map_location='cpu')
-
             data = self.files[file_path]
-            sample_idx = int(local_key) # local_key is an integer index for pth
-
-            # Unpack based on whether data is a Dict or List
+            sample_idx = int(local_key)
             if isinstance(data, dict):
-                # Assuming keys: 'x' (input), 'recons' (target/x1), 'mask'
-                # Adjust keys if your dict uses different names like 'x0', 'x1'
                 x0 = data.get('x', data.get('x0'))[sample_idx]
                 x1 = data.get('recons', data.get('x1'))[sample_idx]
                 mask = data.get('mask', data.get('mask'))[sample_idx]
                 init_e = data.get('init_e', data.get('init_e'))[sample_idx]
-                # mask = data['mask'][sample_idx] # Unused in return signature?
             else:
-                # List format: [x, recons, mask]
-                breakpoint()
                 x0 = data[0][sample_idx]
                 x1 = data[1][sample_idx]
                 mask = data[2][sample_idx]
                 init_e = data[3][sample_idx]
-
-            # Return signature for reflow: (x0, x1, mask, init_e, particle_pi =dummy, gap_pid = dummy, idx)
             return (x0, x1, mask, init_e, 0.0, 0.0, idx)
 
         # --- STANDARD / HDF5 CASE ---
         else:                
-            # Check if file handle is open
             if file_path not in self.files:
-                # 'swmr=True' allows multiple workers to read safely
                 self.files[file_path] = h5py.File(file_path, "r", libver='latest', swmr=True)
             
             f = self.files[file_path]
             
             try:
-                group = f[local_key] # local_key is a string key for h5
-                
-                # Use [:] for faster slicing than [()]
+                group = f[local_key]
                 indices = group["indices"][:]
                 values = group["values"][:]
                 material = group['material'][()].decode('utf-8')
                 gap_pid = material_dict[material]
                 
-                # Efficiently stack
+                # Note: We return RAW values here. 
+                # The Scaler will apply log transform + normalization during training.
                 shower = np.column_stack((indices, values))
                 
                 initial_energy = group.attrs.get("initial_energy", 0.0)
@@ -165,13 +220,14 @@ class LazyIDLDataset(Dataset):
                 return (
                     torch.from_numpy(shower).float(),
                     torch.tensor(initial_energy).float(),
-                    torch.tensor(0).long(), # particle_index TODO hardcoded photon
+                    torch.tensor(0).long(), 
                     torch.tensor(gap_pid).long(),
                     idx
                 )
             except Exception as e:
                 print(f"Error accessing {local_key} in {file_path}: {e}")
                 raise e
+
 # Old version before adding reflow
 # class LazyIDLDataset(Dataset):
 #     def __init__(self, data_dir, transform=None, reflow= False):
@@ -283,162 +339,3 @@ class LazyIDLDataset(Dataset):
 #                 # Return a dummy sample or re-raise
 #                 raise e
             
-#load latents from pcvae model
-class LatentDataset(torch.utils.data.Dataset):
-    def __init__(self, latent_file):
-        data = torch.load(latent_file)
-        self.mu = data['mu']
-        self.logvar = data['logvar']
-
-    def __len__(self):
-        return len(self.mu)
-
-    def __getitem__(self, idx):
-        # Sample from the distribution (Reparameterization trick)
-        mu = self.mu[idx]
-        std = torch.exp(0.5 * self.logvar[idx])
-        z = mu + std * torch.randn_like(std)
-        return z
-    
-
-class ECAL_Chunked_Dataset(Dataset):
-    def __init__(self, file_path: str,
-                 max_seq_length=1700,
-                 #energy_digitizer=None,
-                 verbose=False,
-                 ordering: Literal['energy', 'spatial'] = 'spatial',
-                 material_list: list = ["G4_W", "G4_Ta", "G4_Pb"],
-                 inference_mode: bool = False
-                ):
-
-        # Constant shape per shot
-        self.shape = (30, 30, 30)
-        self.max_seq_length = max_seq_length
-        #self.energy_digitizer = energy_digitizer
-        self.verbose = verbose
-        self.ordering = ordering
-        self.material_list = material_list
-        self.SOS_token = 0
-        # Positional Tokens 1-27000
-        self.EOS_token = 27000 + 1  # 27001
-        self.pad_token = self.EOS_token + 1  # 27002
-        self.inference_mode = inference_mode
-
-        # Energy tokens
-        self.energy_EOS_token = 24938 + 1
-        self.energy_pad_token = 24938 + 2
-
-        self.file_list = [os.path.join(file_path, f) 
-                      for f in os.listdir(file_path)]# if f.endswith('.pkl')]
-        if self.inference_mode:
-            self.memory_cache, self.ground_truth_cache = self._load_all_into_memory()
-        else:
-            self.memory_cache = self._load_all_into_memory()
-
-    def _encode_sample(self, indices, values):
-        if self.ordering == 'energy':
-            tokens = self.energy_digitizer.tokenize((indices, values))
-
-            if tokens.size > self.max_seq_length:
-                topk_idx = np.argpartition(tokens, -self.max_seq_length)[-self.max_seq_length:]
-                sorted_positions = topk_idx[np.argsort(-tokens[topk_idx])]
-            else:
-                sorted_positions = np.argsort(-tokens)
-
-            sorted_energies = tokens[sorted_positions]
-
-            cut_index = np.argmax(sorted_energies == 1)
-            if sorted_energies[cut_index] != 1:
-                cut_index = len(sorted_energies)
-
-            sorted_positions = sorted_positions[:cut_index]
-            sorted_energies = sorted_energies[:cut_index]
-
-        elif self.ordering == 'spatial':
-            flat = np.ravel_multi_index(indices.T, self.shape)
-            order = np.argsort(flat)
-            flat_sorted = flat[order]
-            vals_sorted = values[order]
-
-            sorted_energies = np.digitize(vals_sorted, self.energy_digitizer.e_bins)
-            if flat_sorted.size > self.max_seq_length:
-                flat_sorted = flat_sorted[:self.max_seq_length]
-                sorted_energies = sorted_energies[:self.max_seq_length]
-            sorted_positions = flat_sorted
-
-        else:
-            raise ValueError(f"Unknown ordering: {self.ordering}")
-
-        return sorted_positions, sorted_energies
-
-    def _load_all_into_memory(self):
-        # if self.energy_digitizer is None:
-        #     raise ValueError("Energy digitizer must be provided for tokenization.")
-
-        cache = []
-        file_to_groupkeys = {}
-        ground_truth_cache = []
-
-        if self.verbose:
-            print('Loading Files Into Memory...')
-
-        for file_path in self.file_list:
-            if self.verbose:
-                print(f'Processing file: {file_path}')
-            with h5py.File(file_path, "r") as f:
-                for key in f.keys():
-                    group = f[key]
-                    indices = group["indices"][()]
-                    values = group["values"][()]
-                    initial_energy = group.attrs["initial_energy"].item()
-                    material = group['material'][()].decode('utf-8')
-
-                    if self.inference_mode:
-                        ground_truth_cache.append(initial_energy)
-                    material_index = self.material_list.index(material)
-                    #initial_energy = ((initial_energy - 10.) / 45.) - 1.0 # Scale to roughly -1 to 1
-                    #print("Material:", material, "Index:", material_index, "Initial Energy:", initial_energy)
-
-                    # Tokenize + order
-                    # sorted_positions, sorted_energies = self._encode_sample(indices, values)
-                    # sorted_positions, sorted_energies = self._encode_sample(indices, values)
-                    # # Add SOS/EOS
-                    # sorted_positions = np.insert(sorted_positions, 0, self.SOS_token)
-                    # sorted_positions = np.append(sorted_positions, self.EOS_token)
-
-                    # sorted_energies = np.insert(sorted_energies, 0, self.SOS_token)
-                    # sorted_energies = np.append(sorted_energies, self.energy_EOS_token)
-
-                    #cache.append((sorted_positions, sorted_energies, initial_energy, material_index))
-                    cache.append((indices, values, initial_energy, material_index))
-
-
-        if not self.inference_mode:
-            random.shuffle(cache)
-            return cache
-
-        else:
-            return cache,ground_truth_cache
-
-    def __len__(self):
-        return len(self.memory_cache)
-
-    def __getitem__(self, idx):
-        pos, ene, initial_energy, material_index = self.memory_cache[idx]
-        initial_energy_t = self.ground_truth_cache[idx]
-        assert len(pos) == len(ene)
-        # Pad to max_seq_length
-        if len(pos) < self.max_seq_length:
-            pos = np.pad(pos, (0, self.max_seq_length - len(pos)), constant_values=self.pad_token)
-            ene = np.pad(ene, (0, self.max_seq_length - len(ene)), constant_values=self.energy_pad_token)
-        elif len(pos) > self.max_seq_length:
-            pos = pos[:self.max_seq_length]
-            ene = ene[:self.max_seq_length]
-        else:
-            pass
-
-        if not self.inference_mode:
-            return pos, ene, initial_energy, material_index
-
-        else:
-            return pos, ene, initial_energy, material_index, initial_energy_t

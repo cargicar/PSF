@@ -9,6 +9,7 @@ from torch.distributions import Normal
 from utils.file_utils import *
 from utils.visualize import *
 from utils.train_utils import *
+from datasets.transforms import PointCloudStandardScaler
 from model.calopodit import DiT, DiTConfig
 import torch.distributed as dist
 
@@ -117,6 +118,8 @@ def test(gpu, opt, output_dir, noises_init):
 
     train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
     dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=partial(pad_collate_fn, max_particles= train_dataset.max_particles))
+    # Transforms
+    scaler = PointCloudStandardScaler(train_dataset.stats)    
 
 
     '''
@@ -211,7 +214,7 @@ def test(gpu, opt, output_dir, noises_init):
     # CFG Scale (Usually 2.0 to 7.0 for diffusion/flow)
     # 1.0 = No guidance (standard), 4.0 = Strong guidanc
     #TODO create args for cfg scale
-    cfg_scale = 4.0
+    cfg_scale = 6.0
     masks =[]
     xs = []
     recons = []
@@ -219,10 +222,12 @@ def test(gpu, opt, output_dir, noises_init):
     model.eval()
     with torch.no_grad():
         for i, data in enumerate(dataloader):
-            if i < 73:
+            if i < 74:
                 continue
             if opt.dataname == 'g4' or opt.dataname == 'idl':
                 x, mask, int_energy, y, gap_pid, idx = data
+                gap_pid = gap_pid.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
+                y = y.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
             elif opt.dataname == 'shapenet':
                 x = data['train_points']
                 if opt.model_name == "pvcnn2":      
@@ -239,6 +244,8 @@ def test(gpu, opt, output_dir, noises_init):
                 y = y.cuda(gpu,  non_blocking=True)
                 gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
                 int_energy = int_energy.cuda(gpu,  non_blocking=True)
+                int_energy = int_energy.cuda(gpu,  non_blocking=True)
+                scaler = scaler.cuda(gpu)
                 #noises_batch = noises_batch.cuda(gpu)
             elif opt.distribution_type == 'single':
                 x = x.cuda()
@@ -246,11 +253,16 @@ def test(gpu, opt, output_dir, noises_init):
                 y = y.cuda()
                 gap_pid = gap_pid.cuda()
                 int_energy = int_energy.cuda()
+                int_energy = int_energy.cuda()
+                scaler = scaler.cuda()
                 #noises_batch = noises_batch.cuda()
             
             rectified_flow.device = x.device      
             
-            t = rectified_flow.sample_train_time(x.shape[0])
+            #Transform
+            x_1 = scaler.transform(x, mask=mask)
+
+            t = rectified_flow.sample_train_time(x_1.shape[0])
             t= t.squeeze()
             #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
 
@@ -281,11 +293,13 @@ def test(gpu, opt, output_dir, noises_init):
                     num_steps=num_steps,
                     cfg_scale=cfg_scale,
                     )
-                pts= traj1.x_t
+                pts_norm= traj1.x_t
                 trajectory = traj1.trajectories
                 print(f"Rank {gpu}: Generating batch {i}")
+                # Un-Normalize back to real physics units
+                pts = scaler.inverse_transform(pts_norm, mask=mask)
                 #if gpu == 0:
-                save_path = f'{opt.pthsave}_calopodit_gen_gapclasses_sample_w_Feb_1_rank_{gpu}_batch_{i}.pth'
+                save_path = f'{opt.pthsave}_calopodit_gen_gapclasses_sample_w_ta_Feb_5_rank_{gpu}_batch_{i}.pth'
                 #torch.save([final_xs.cpu(), final_recons.cpu(), final_masks.cpu(), final_gaps.cpu()], save_path)  
                 torch.save([x.cpu(), pts.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path)  
                 print(f"Batch data saved to {save_path}")
@@ -395,7 +409,7 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/')# Training
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/')
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     parser.add_argument('--category', default='all', help='category of dataset')

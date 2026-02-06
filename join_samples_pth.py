@@ -49,6 +49,7 @@ def combine_pth_files(input_dir, output_filename, pattern="_calopodit_gen_gapcla
 if __name__ == "__main__":
     # Update these paths to match your setup
     target_directory = "/pscratch/sd/c/ccardona/datasets/pth" 
-    output_file = f"/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_3_sample_w.pth"
+    pattern = "_calopodit_gen_gapclasses_sample_w_ta_Feb_5_rank_*.pth"
+    output_file = f"{target_directory}/combined_batches_calopodit_gen_Feb_5.pth"
     
-    combine_pth_files(target_directory, output_file)
+    combine_pth_files(target_directory, output_file, pattern= pattern)

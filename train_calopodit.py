@@ -10,6 +10,7 @@ from torch.distributions import Normal
 from utils.file_utils import *
 from utils.visualize import *
 from utils.train_utils import *
+from datasets.transforms import PointCloudStandardScaler
 from model.calopodit import DiT, DiTConfig
 import torch.distributed as dist
 
@@ -144,7 +145,7 @@ def load_checkpoint_with_gap_surgery(model, checkpoint_path, new_gap_classes, ne
     
     return model
 
-def fine_tuning_modulate(model, lr=0.001):
+def fine_tuning_modulate(model, lr=0.001, decay = 0.01):
     # Call after model = DiT(config)... and loading weights...
     # Returns Optimizer!
     
@@ -191,9 +192,10 @@ def fine_tuning_modulate(model, lr=0.001):
 
     # Create optimizer ONLY for trainable parameters
     # The filter function works perfectly on the DDP wrapper or the inner model
-    optimizer = optim.Adam(
+    optimizer = optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()), 
-        lr=lr
+        lr=lr,
+        weight_decay=decay
     )
     
     return optimizer
@@ -233,6 +235,8 @@ def train(gpu, opt, output_dir):
     else:
         dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None)
 
+    # Transforms
+    scaler = PointCloudStandardScaler(train_dataset.stats)    
 
     '''
     create networks
@@ -269,17 +273,53 @@ def train(gpu, opt, output_dir):
     if opt.model_ckpt != '':
         if opt.fine_tuning:
             model = load_checkpoint_with_gap_surgery(model, opt.model_ckpt, new_gap_classes=opt.gap_classes) 
-            optimizer = fine_tuning_modulate(model, lr= opt.lr*0.1)
+            optimizer = fine_tuning_modulate(model, lr= opt.lr*0.1, decay=opt.decay)
         else:
             ckpt = torch.load(opt.model_ckpt)
             model.load_state_dict(ckpt['model_state'])
             #optimizer.load_state_dict(ckpt['optimizer_state'])
-            optimizer= optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
+            optimizer= optim.AdamW(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
             #if 'scaler_state' in ckpt: 
             #    scaler.load_state_dict(ckpt['scaler_state'])
     else:
-        optimizer= optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
+        optimizer= optim.AdamW(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
 
+    #Schedulers
+    # 1. Warmup for first 5 epochs (or ~1000 steps)
+    # warmup_epochs = 3
+    # warmup_scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=1e-3, total_iters=warmup_epochs)
+
+    # # 2. Cosine Decay (Smoothly drops to 0 by the last epoch)
+    # # T_max should be (total_epochs - warmup_epochs)
+    # # Calculate total steps
+    # total_steps = (opt.niter - warmup_epochs) * len(dataloader)
+
+    # main_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
+
+    # # Combine
+    # lr_scheduler = optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[warmup_epochs])
+
+    # One CicleLR for short runs
+    # 1. Calculate Total Training Steps
+    # (Make sure to account for gradient accumulation if you use it, though your code doesn't seem to)
+    steps_per_epoch = len(dataloader)
+    total_steps = opt.niter * steps_per_epoch
+
+    # 2. Define the Scheduler
+    # max_lr: The peak learning rate. Since 1e-3 was unstable, let's try 1e-4 or 3e-4.
+    # pct_start: The percentage of training spent warming up (2 epochs / 10 epochs = 0.2)
+    # div_factor: Initial LR = max_lr / div_factor. Default is 25.
+    # final_div_factor: Final LR = Initial LR / final_div_factor. Default is 1e4.
+
+    lr_scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=1e-4,             # Peak LR (Try 1e-4 if 3e-4 is still unstable)
+        total_steps=total_steps, # Exact number of batch updates
+        pct_start=0.2,           # Warmup for first 20% (2 epochs)
+        anneal_strategy='cos',   # Cosine shape
+        div_factor=25.0,         # Starts at 3e-4 / 25 = 1.2e-5
+        final_div_factor=100.0,  # Ends at 1.2e-5 / 100 = 1.2e-7
+    )
     if opt.model_ckpt != '':
         start_epoch = torch.load(opt.model_ckpt)['epoch'] + 1
     else:
@@ -314,13 +354,13 @@ def train(gpu, opt, output_dir):
 
     #scaler = GradScaler(enabled=True)
 
-    lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
+    #lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, opt.lr_gamma)
 
     # def new_x_chain(x, num_chain):
     #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
     #Rectified_Flow
     #rf_criterion = RectifiedFlowLossFunction(loss_type = "mse")
-    rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 0.1)
+    rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 1.0)
     p_drop = opt.dropout
     
     data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
@@ -346,8 +386,8 @@ def train(gpu, opt, output_dir):
             for epoch in range(start_epoch, opt.niter):
                 if opt.distribution_type == 'multi':
                     train_sampler.set_epoch(epoch)
-                lr_scheduler.step(epoch)
-                
+                #lr_scheduler.step(epoch) #seem to be deprecated?
+                #lr_scheduler.step()
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         if opt.is_independent_coupling:
@@ -376,6 +416,7 @@ def train(gpu, opt, output_dir):
                         y = y.cuda(gpu,  non_blocking=True)
                         gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
                         int_energy = int_energy.cuda(gpu,  non_blocking=True)
+                        scaler = scaler.cuda(gpu)
                         #noises_batch = noises_batch.cuda(gpu)
                     elif opt.distribution_type == 'single':
                         x = x.cuda()
@@ -383,20 +424,37 @@ def train(gpu, opt, output_dir):
                         y = y.cuda()
                         gap_pid = gap_pid.cuda()
                         int_energy = int_energy.cuda()
+                        scaler = scaler.cuda()
                         #noises_batch = noises_batch.cuda()
                     
                     rectified_flow.device = x.device      
                     optimizer.zero_grad()
+
+                    #Transform
+                    x_1 = scaler.transform(x, mask=mask)
+                    
+                    if debug:
+                        means = x_1.mean(dim=0)
+                        stds= x_1.std(dim=0)
+                        print(f"Channel Means (Target ~0): {means.cpu().numpy()}")
+                        print(f"Channel Stds  (Target ~1): {stds.cpu().numpy()}")
+                        
+                        # Energy Channel Check (Index 3)
+                        if abs(means[3]) > 0.5 or abs(stds[3] - 1.0) > 0.5:
+                            print("WARNING: Energy channel normalization is OFF. Check dataset stats.")
+                        else:
+                            print("Normalization looks healthy.")
+
                     #with autocast(enabled=True):
                     if opt.is_independent_coupling:
-                        x_0 = rectified_flow.sample_source_distribution(x.shape[0])
+                        x_0 = rectified_flow.sample_source_distribution(x_1.shape[0])
                     if opt.model_name == "pvcnn2":
                         x_0 = x_0.transpose(1,2)
-                    t = rectified_flow.sample_train_time(x.shape[0])
+                    t = rectified_flow.sample_train_time(x_1.shape[0])
                     t= t.squeeze()
 
                     #CFG
-                    batch_size = x.shape[0]
+                    batch_size = x_1.shape[0]
                     if p_drop > 0:
                         force_drop_ids = torch.bernoulli(torch.full((batch_size,), p_drop, device=x.device)).bool()
                     else:
@@ -404,7 +462,7 @@ def train(gpu, opt, output_dir):
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
                     loss = rectified_flow.get_loss(
                                 x_0=x_0,
-                                x_1=x,
+                                x_1=x_1,
                                 y= y,
                                 gap= gap_pid,
                                 energy=int_energy,
@@ -422,6 +480,7 @@ def train(gpu, opt, output_dir):
                     #    torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
 
                     #scaler.step(optimizer)
+                    lr_scheduler.step() #FIXME or #TODO doing lr updates per batch
                     optimizer.step()
                     #scaler.update()
                     if prof is not None:
@@ -476,11 +535,11 @@ def train(gpu, opt, output_dir):
                             #     full_x, full_pts, full_mask = x, pts, mask
                             # if gpu ==0:
                             #     torch.save([full_x, full_pts, full_mask], f'{opt.pthsave}calopodit_train_Jan_17_epoch_{epoch}_m.pth')  
-                            torch.save([x, pts, mask], f'{opt.pthsave}calopodit_train_Jan_28_epoch_{epoch}.pth')  
+                            torch.save([x_1, pts, mask], f'{opt.pthsave}calopodit_train_Jan_28_epoch_{epoch}.pth')  
                             print(f"Samples for testing save to {opt.pthsave}")
                             
                         with torch.no_grad():
-                            plot_4d_reconstruction(x.transpose(1,2), pts.transpose(1,2), savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
+                            plot_4d_reconstruction(x_1.transpose(1,2), pts.transpose(1,2), savepath=f"{outf_syn}/reconstruction_ep_{epoch}.png", index=0)
                     # if debug:
                     #     visualize_pointcloud_batch('%s/epoch_%03d_samples_eval.png' % (outf_syn, epoch),
                     #                             trajectory, None, None,
@@ -606,11 +665,11 @@ def parse_args():
     parser.add_argument('--model_mean_type', default='eps')
     parser.add_argument('--model_var_type', default='fixedsmall')
 
-    parser.add_argument('--lr', type=float, default=2e-4, help='learning rate for E, default=0.0002')
+    parser.add_argument('--lr', type=float, default=1e-6, help='learning rate for E, default=0.0002')
     parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
-    parser.add_argument('--decay', type=float, default=0, help='weight decay for EBM')
+    parser.add_argument('--decay', type=float, default=0.01, help='weight decay for EBM')
     parser.add_argument('--grad_clip', type=float, default=1.0, help='weight decay for EBM')
-    parser.add_argument('--lr_gamma', type=float, default=0.998, help='lr decay for EBM')
+    parser.add_argument('--lr_gamma', type=float, default=0.9, help='lr decay for EBM')
 
     parser.add_argument('--model_ckpt', default='', help="path to model checkpoint (to continue training)")
 

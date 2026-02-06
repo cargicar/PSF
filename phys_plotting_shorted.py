@@ -32,8 +32,6 @@ from metrics.physics.plotting_utils import (
     plot_ratios
 )
 
-from utils.train_utils import enforce_energy_conservation as enc
-
 def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = None, material: str = None, **kwargs):
     """Plots the features of multiple constituent or shower sets.
 
@@ -551,15 +549,10 @@ def read_generated_pth(file_path, num_showers=-1, prob_threshold=0.0):
         num_showers = x_tensor.shape[0]-1
     with torch.no_grad():
         for i in range(num_showers):
-            used_transform = False #Create flag and transforms list to invert 
-            if used_transform:
-                x_tensor = invert_normalize_pc4d(x_tensor)
-                gen_tensor = invert_normalize_pc4d(gen_tensor)
+
             # Target data (Ground Truth)
-            
             if x_tensor.shape[1] == 4:
-                x, y, z, e = x_tensor[i] # [4, N]
-                
+                x, y, z, e = x_tensor[i] # [4, N]    
                 # Generated data (Model Output)
                 # Assuming shape [5, N] where indices are:
                 # 0:x, 1:y, 2:z, 3:E, 4:hit_prob
@@ -615,7 +608,7 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
 
     #for material in material_list:
     if isinstance(file_paths, list):
-        generated_features, ground_truth_features = read_generated(file_paths, material_list, num_showers, material)
+        generated_features, ground_truth_features = read_generated(file_paths, material_list, num_showers, material, enforce_conservation = True)
     else:
         generated_features, ground_truth_features = read_generated_pth(file_paths, num_showers)
     fig = plot_paper_plots(
@@ -629,19 +622,19 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
     fig.savefig(f"{title}", dpi=300)
 
 if __name__ == "__main__":
-    material = "G4_W"
+    material = "G4_Ta"
     date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     import argparse
     parser = argparse.ArgumentParser(description="Plot generated showers vs ground truth")
     #parser.add_argument("--file_path", type=str, required=True, help="Path to the HDF5 file containing generated showers")
     if material == "G4_W":
-        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/w_sim/photon-shower-16_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
+        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/w_sim/photon-shower-1_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
     if material == "G4_Ta":
-        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/ta_sim/photon-shower-16_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
+        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/ta_sim/photon-shower-1_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
         #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Jan_17.pth') # For the case when we can to read original and generated from the same pth file
     parser.add_argument('--title', default=f'phys_metrics_calopodit_{date_str}_{material}')
     #parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/logs/example_backbone/runs/2026-02-02_pretrained_from_paper/gen_samples/showers.parquet')
-    parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_3_sample_w.pth')
+    parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_5.pth')
     #parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-06_clopodit_idl_mask/syn/combined_photon_samples.pth')
     parser.add_argument("--num_showers", type=int, default=-1, help="Number of showers to process (-1 for all)")
     args = parser.parse_args()

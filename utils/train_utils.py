@@ -244,7 +244,7 @@ class MyEulerSampler(Sampler):
             self.x_t = self.x_t * mask
 
 class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
-    def __init__(self, loss_type: str = "mse", energy_weight: float = 0.1):
+    def __init__(self, loss_type: str = "mse", energy_weight: float = 0.0):
         super().__init__(loss_type=loss_type)
         self.energy_weight = energy_weight
 
@@ -256,7 +256,7 @@ class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
         t: torch.Tensor,
         time_weights: torch.Tensor,
         mask: torch.Tensor = None,           # Added mask
-        target_energy: torch.Tensor = None,   # Added for physics constraint
+        #target_energy: torch.Tensor = None,   # Added for physics constraint
     ) -> torch.Tensor:
         """
         Calculates a masked MSE loss + Energy Conservation constraint.
@@ -286,7 +286,7 @@ class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
         #  Physics Constraint: Energy Conservation
         # Constrain the sum of velocities in the energy dimension (index 3)
 
-        if target_energy is not None and mask is not None:
+        if mask is not None:
             # Velocity toward the target sum: sum(v_t_energy) should match sum(dot_x_t_energy)
             pred_energy_sum = (v_t[:, :, 3] * mask).sum(dim=1)
             target_energy_sum = (dot_x_t[:, :, 3] * mask).sum(dim=1)

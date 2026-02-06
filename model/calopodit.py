@@ -347,15 +347,24 @@ class SineSpatialEmbedder(nn.Module):
         return self.mlp(x)
     
 class FourierSpatialEmbedder(nn.Module):
-    def __init__(self, hidden_size, scale=30.0):
+    def __init__(self, hidden_size, base_scale=1.0):
         super().__init__()
         self.hidden_size = hidden_size
-        # Make B a non-trainable buffer (fixed random frequencies)
+        
+        # We divide the hidden_size // 2 pairs into 4 frequency groups
+        # This provides a 'spectrum' of spatial resolution
+        # Group 1: Scale 1.0 (Global shape)
+        # Group 2: Scale 4.0 (Medium features)
+        # Group 3: Scale 8.0 (Detailed features)
+        # Group 4: Scale 16.0 (Fine details)
+        
+        # Fixed random basis
         self.register_buffer("B", torch.randn(3, hidden_size // 2))
         
-        # Make scale a learnable parameter initialized to 30.0
-        self.scale = nn.Parameter(torch.tensor(scale))
-        
+        # Learnable scale multiplier for each dimension
+        # Initializing near base_scale (1.0) is safer for normalized inputs
+        self.log_scale = nn.Parameter(torch.zeros(1, 1, hidden_size // 2))
+
         self.mlp = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.SiLU(),
@@ -363,14 +372,21 @@ class FourierSpatialEmbedder(nn.Module):
         )
 
     def forward(self, x):
-        # x: (B, N, 3)
-        # Apply learnable scale
-        x_proj = (2 * torch.pi * x) @ (self.B * self.scale)
+        """
+        x: (B, N, 3) normalized coordinates in range [-1, 1]
+        """
+        # x_proj = 2 * pi * x @ B * exp(log_scale)
+        # The exp(log_scale) ensures the scale stays positive
+        scales = torch.exp(self.log_scale)
         
+        # Project each frequency component with its specific scale
+        x_proj = (2 * torch.pi * x) @ self.B 
+        x_proj = x_proj * scales # Apply multi-scale weighting
+        
+        # Standard Sin/Cos activation
         x_emb = torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+        
         return self.mlp(x_emb)
-    
-
 #############################################################################3
 #               Point Embedder  (Unused)                                 #
 ##########################################################################
@@ -429,7 +445,7 @@ class DiTBlock(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = NativeAttention(hidden_size, num_heads=num_heads, qkv_bias=True)
         
-        # 2. Cross-Attention Block (New!)
+        # 2. Cross-Attention Block 
         # We use a standard LayerNorm here for simplicity
         self.norm_cross = nn.LayerNorm(hidden_size)
         self.cross_attn = NativeAttention(hidden_size, num_heads=num_heads, qkv_bias=True)
@@ -481,7 +497,7 @@ class DiTBlock(nn.Module):
         )
         
         return x
-
+    
 class FinalLayer(nn.Module):
     """
     The final layer of DiT.
@@ -589,16 +605,6 @@ class DiT(nn.Module):
                 config.hidden_size, config.class_dropout_prob
             )
         
-        #NOTE concatenated conditionals
-        cond_dim = config.hidden_size 
-
-        if config.num_classes > 0:
-            cond_dim += config.hidden_size
-        if config.gap_classes > 0:
-            cond_dim += config.hidden_size
-        if config.energy_cond:
-            cond_dim += config.hidden_size
-
         self.in_blocks = nn.ModuleList(
             [
                 DiTBlock(
@@ -635,7 +641,7 @@ class DiT(nn.Module):
         )
 
     def initialize_weights(self):
-        # Initialize transformer layers:
+        # 1. Basic Xavier/Glorot for all Linear layers
         def _basic_init(module):
             if isinstance(module, nn.Linear):
                 torch.nn.init.xavier_uniform_(module.weight)
@@ -644,41 +650,29 @@ class DiT(nn.Module):
 
         self.apply(_basic_init)
 
-        #FIXME? Not pos_emb
-        # Initialize (and freeze) pos_embed by sin-cos embedding:
-        # pos_embed = get_2d_sincos_pos_embed(
-        #     #self.pos_embed.shape[-1], int(self.x_embedder.num_patches**0.5)
-        #     self.pos_embed.shape[-1], int(self.config.num_points**0.5)
-        # )
-        #self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))        
-        #Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
-        # w = self.x_embedder.proj.weight.data
-        # nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
-        # nn.init.constant_(self.x_embedder.proj.bias, 0)
-
-        # Initialize label embedding table:
+        # 2. Condition Embedders (Null token safety)
         if hasattr(self, "y_embedder"):
             nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
-            # Explicitly zero out the last embedding (the null token)
+            # Force the NULL token (last index) to zero initially
             nn.init.zeros_(self.y_embedder.embedding_table.weight[self.config.num_classes])
+
         if hasattr(self, "gap_embedder"):
             nn.init.normal_(self.gap_embedder.embedding_table.weight, std=0.02)
+            nn.init.zeros_(self.gap_embedder.embedding_table.weight[self.config.gap_classes])
+
         if hasattr(self, "e_embedder"):
-            for layer in self.e_embedder.embedding_mlp:
-                if isinstance(layer, nn.Linear):
-                    # Use Xavier/Glorot for weights, often preferred for linear layers
-                    nn.init.xavier_uniform_(layer.weight)
-                    # Initialize bias to zero (if bias exists)
-                    if layer.bias is not None:
-                        nn.init.zeros_(layer.bias)              
-            # Initialize null embedding parameter
+            # Zero out null_embedding so unconditional = "neutral" energy
             nn.init.zeros_(self.e_embedder.null_embedding)
-            #nn.init.normal_(self.e_embedder.null_embedding, std=0.02)
 
-        # Initialize timestep embedding MLP:
-        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        # 3. Fourier Log-Scale Initialization
+        # Initializing log_scale to 0 makes exp(0) = 1.0 (The base_scale)
+        if hasattr(self.pos_embedder, "log_scale"):
+            nn.init.constant_(self.pos_embedder.log_scale, 0.0)
 
+        # 4. Zero-init Strategy for AdaLN (Critical for stability)
+        # DiT relies on the blocks starting as Identity transforms.
+        # We zero-initialize the FINAL linear layer in every modulation sequence.
+        
         for block in self.in_blocks:
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
@@ -690,12 +684,12 @@ class DiT(nn.Module):
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
-        # Zero-out output layers:
+        # 5. Final Layer Zero-Init
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+        # Zero-init the head to output a mean-velocity of zero initially
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
-
     def save_pretrained(self, save_directory: str, filename: str = "dit"):
         os.makedirs(save_directory, exist_ok=True)
         config_path = os.path.join(save_directory, f"{filename}_config.json")
@@ -761,15 +755,15 @@ class DiT(nn.Module):
         
         if hasattr(self, "y_embedder") and y is not None:
             y_emb = self.y_embedder(y, self.training, force_drop_ids)
-            context_tokens.append(y_emb.unsqueeze(1)) # <--- HERE
+            context_tokens.append(y_emb.unsqueeze(1)) 
             
         if hasattr(self, "gap_embedder") and gap is not None:
             gap_emb = self.gap_embedder(gap, self.training, force_drop_ids)
-            context_tokens.append(gap_emb.unsqueeze(1)) # <--- HERE
+            context_tokens.append(gap_emb.unsqueeze(1))
             
         if hasattr(self, "e_embedder") and energy is not None:
             energy_emb = self.e_embedder(energy, self.training, force_drop_ids)
-            context_tokens.append(energy_emb.unsqueeze(1)) # <--- HERE
+            context_tokens.append(energy_emb.unsqueeze(1)) 
             
         # Stack them along sequence dim: (B, Num_Conds, Hidden)
         if len(context_tokens) > 0:
@@ -781,14 +775,14 @@ class DiT(nn.Module):
         skips = []
         for block in self.in_blocks:
             # Pass key_padding_mask instead of raw mask
-            x = checkpoint(block, x, c, key_padding_mask, use_reentrant=False)
+            x = checkpoint(block, x, c, context, key_padding_mask, use_reentrant=False)
             skips.append(x)
 
-        x = checkpoint(self.mid_block, x, c, key_padding_mask, use_reentrant=False)
+        x = checkpoint(self.mid_block, x, c, context, key_padding_mask, use_reentrant=False)
 
         for block in self.out_blocks:
             x_skip = skips.pop()
-            x = checkpoint(block, x, c, key_padding_mask, x_skip, use_reentrant=False)
+            x = checkpoint(block, x, c, context, key_padding_mask, x_skip, use_reentrant=False)
 
         # 5. Output
         x = self.final_layer(x, c) 

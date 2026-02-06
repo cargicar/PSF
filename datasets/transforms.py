@@ -1,4 +1,6 @@
 import torch
+import torch.nn as nn
+
 import numpy as np
 import math
 import random
@@ -19,6 +21,161 @@ class Compose:
         for t in self.transforms:
             img = t(img)
         return img
+import torch
+import torch.nn as nn
+
+class PointCloudPhysicsScaler(nn.Module):
+    """
+    Hybrid Scaler: 
+    - X, Y, Log(Energy): Z-score (Mean/Std)
+    - Z (Layer): Min-Max to [-1, 1]
+    """
+    def __init__(self, stats_dict, z_min=0.0, z_max=30.0, device="cpu"):
+        super().__init__()
+        
+        # 1. Standard Stats (Mean/Std)
+        mean = stats_dict['mean'].to(device) # [mu_x, mu_y, mu_z, mu_logE]
+        std = stats_dict['std'].to(device)   # [sig_x, sig_y, sig_z, sig_logE]
+        
+        self.register_buffer("mean", mean.view(1, 1, 4))
+        self.register_buffer("std", std.view(1, 1, 4))
+        
+        # 2. Z-Axis Specifics
+        # Pre-calculating Min-Max constants for the Z channel (index 2)
+        self.z_min = z_min
+        self.z_max = z_max
+        # We map [z_min, z_max] -> [-1, 1]
+        self.z_scale = 2.0 / (z_max - z_min + 1e-6)
+
+    def transform(self, x, mask=None):
+        """
+        Input x: (B, N, 4) -> [x, y, z, raw_energy]
+        """
+        # 1. Log-Transform Energy
+        coords_raw = x[..., :3]
+        energy_raw = x[..., 3:4]
+        log_energy = torch.log(energy_raw + 1e-6)
+        x_log = torch.cat([coords_raw, log_energy], dim=-1) # [x, y, z, logE]
+
+        # 2. Apply Z-score to X, Y, and LogE
+        # We skip the Z-index (2) in the standard mu/sigma application
+        x_norm = (x_log - self.mean) / (self.std + 1e-6)
+        
+        # 3. OVERWRITE Z-channel with Min-Max
+        # Map original Z to [-1, 1]
+        z_raw = x[..., 2:3]
+        z_minmax = (z_raw - self.z_min) * self.z_scale - 1.0
+        x_norm[..., 2:3] = z_minmax
+
+        # 4. Masking
+        if mask is not None:
+            x_norm = x_norm * mask.unsqueeze(-1)
+            
+        return x_norm
+
+    def inverse_transform(self, x_norm, mask=None):
+        """
+        Input x_norm: (B, N, 4) -> Normalized [x, y, z, log_energy]
+        """
+        # 1. Un-standardize X, Y, LogE
+        x_log = x_norm * self.std + self.mean
+        
+        # 2. Un-MinMax Z-channel
+        z_norm = x_norm[..., 2:3]
+        z_raw = (z_norm + 1.0) / self.z_scale + self.z_min
+        
+        # 3. Inverse Log for Energy
+        coords = torch.cat([x_log[..., :2], z_raw], dim=-1) # [x, y, z_raw]
+        log_energy = x_log[..., 3:4]
+        energy = torch.exp(log_energy)
+        
+        x_raw = torch.cat([coords, energy], dim=-1)
+        
+        if mask is not None:
+            x_raw = x_raw * mask.unsqueeze(-1)
+            
+        return x_raw
+
+# class PointCloudStandardScaler(nn.Module):
+#     """
+#     Standardizes point cloud data (x, y, z, energy) using pre-computed statistics.
+#     Includes an automatic log-transform for the energy channel to handle large dynamic ranges.
+    
+#     The input stats_dict is expected to contain:
+#     - mean: [mean_x, mean_y, mean_z, mean_log_energy]
+#     - std:  [std_x,  std_y,  std_z,  std_log_energy]
+#     """
+#     def __init__(self, stats_dict, device="cpu"):
+#         """
+#         Args:
+#             stats_dict (dict): Dictionary containing 'mean' and 'std' tensors from LazyIDLDataset.
+#             device (str or torch.device): Device to store the statistics on.
+#         """
+#         super().__init__()
+        
+#         # Extract stats
+#         # shape: (4,) -> [x, y, z, log_energy]
+#         mean = stats_dict['mean'].to(device)
+#         std = stats_dict['std'].to(device)
+        
+#         # Register as buffers (non-trainable parameters that move with the model)
+#         # Reshape to (1, 1, 4) for easy broadcasting against (Batch, Points, 4)
+#         self.register_buffer("mean", mean.view(1, 1, 4))
+#         self.register_buffer("std", std.view(1, 1, 4))
+
+#     def transform(self, x, mask=None):
+#         """
+#         Input: (Batch, Points, 4) [x, y, z, raw_energy]
+#         Output: (Batch, Points, 4) Normalized [x, y, z, log_energy]
+#         """
+#         # 1. Log-Transform Energy Channel
+#         # We must apply this BEFORE normalization because our stats are for log(E)
+#         coords = x[..., :3]
+#         energy = x[..., 3:4]
+        
+#         # Add epsilon to prevent log(0)
+#         log_energy = torch.log(energy + 1e-6)
+        
+#         # Recombine into a single tensor [x, y, z, log_energy]
+#         x_log = torch.cat([coords, log_energy], dim=-1)
+        
+#         # 2. Standardize (Z-Score Normalization)
+#         # (x - mu) / sigma
+#         x_norm = (x_log - self.mean) / (self.std + 1e-6)
+        
+#         # 3. Apply Mask (Keep 0s as 0s)
+#         # Normalization usually shifts 0 to something else (e.g., -1.5). 
+#         # We must zero out the padding explicitly.
+#         if mask is not None:
+#             x_norm = x_norm * mask.unsqueeze(-1)
+            
+#         return x_norm
+
+#     def inverse_transform(self, x, mask=None):
+#         """
+#         Input: (Batch, Points, 4) Normalized [x, y, z, log_energy]
+#         Output: (Batch, Points, 4) Raw [x, y, z, raw_energy]
+#         """
+#         # 1. Un-Standardize
+#         # x * sigma + mu
+#         x_log = x * self.std + self.mean
+        
+#         # 2. Inverse Log-Transform Energy Channel
+#         coords = x_log[..., :3]
+#         log_energy = x_log[..., 3:4]
+        
+#         # Exp to get raw energy back
+#         energy = torch.exp(log_energy)
+        
+#         # 3. Recombine
+#         x_raw = torch.cat([coords, energy], dim=-1)
+        
+#         # 4. Apply Mask
+#         if mask is not None:
+#             x_raw = x_raw * mask.unsqueeze(-1)
+            
+#         return x_raw
+
 class MinMaxNormalize:
     """
     Min-Max normalization transform for PyTorch datasets.
@@ -99,24 +256,6 @@ class Center(object):
 
     def __repr__(self):
         return '{}()'.format(self.__class__.__name__)
-
-
-class NormalizeScale(object):
-    r"""Centers and normalizes node positions to the interval :math:`(-1, 1)`.
-    """
-
-    def __init__(self, attr):
-        self.center = Center(attr=attr)
-        self.attr = attr
-
-    def __call__(self, data):
-        data = self.center(data)
-
-        for key in self.attr:
-            scale = (1 / data[key].abs().max()) * 0.999999
-            data[key] = data[key] * scale
-
-        return data
 
 
 class FixedPoints(object):

@@ -50,6 +50,6 @@ if __name__ == "__main__":
     # Update these paths to match your setup
     target_directory = "/pscratch/sd/c/ccardona/datasets/pth" 
     pattern = "_calopodit_gen_gapclasses_sample_w_ta_Feb_5_rank_*.pth"
-    output_file = f"{target_directory}/combined_batches_calopodit_gen_Feb_5.pth"
+    output_file = f"{target_directory}/combined_batches_calopodit_gen_Feb_6.pth"
     
     combine_pth_files(target_directory, output_file, pattern= pattern)

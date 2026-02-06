@@ -10,7 +10,7 @@ from torch.distributions import Normal
 from utils.file_utils import *
 from utils.visualize import *
 from utils.train_utils import *
-from datasets.transforms import PointCloudStandardScaler
+from datasets.transforms import PointCloudPhysicsScaler #PointCloudStandardScaler
 from model.calopodit import DiT, DiTConfig
 import torch.distributed as dist
 
@@ -236,7 +236,7 @@ def train(gpu, opt, output_dir):
         dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None)
 
     # Transforms
-    scaler = PointCloudStandardScaler(train_dataset.stats)    
+    scaler = PointCloudPhysicsScaler(train_dataset.stats)    
 
     '''
     create networks
@@ -302,6 +302,7 @@ def train(gpu, opt, output_dir):
     # One CicleLR for short runs
     # 1. Calculate Total Training Steps
     # (Make sure to account for gradient accumulation if you use it, though your code doesn't seem to)
+    #TODO Add flag to change between OneCicleLR for short runs and CosineAnnealingLR for longer runs
     steps_per_epoch = len(dataloader)
     total_steps = opt.niter * steps_per_epoch
 

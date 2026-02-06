@@ -608,7 +608,7 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
 
     #for material in material_list:
     if isinstance(file_paths, list):
-        generated_features, ground_truth_features = read_generated(file_paths, material_list, num_showers, material, enforce_conservation = True)
+        generated_features, ground_truth_features = read_generated(file_paths, material_list, num_showers, material, enforce_conservation = False)
     else:
         generated_features, ground_truth_features = read_generated_pth(file_paths, num_showers)
     fig = plot_paper_plots(
@@ -622,7 +622,7 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
     fig.savefig(f"{title}", dpi=300)
 
 if __name__ == "__main__":
-    material = "G4_Ta"
+    material = "G4_W"
     date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     import argparse
     parser = argparse.ArgumentParser(description="Plot generated showers vs ground truth")
@@ -634,7 +634,7 @@ if __name__ == "__main__":
         #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Jan_17.pth') # For the case when we can to read original and generated from the same pth file
     parser.add_argument('--title', default=f'phys_metrics_calopodit_{date_str}_{material}')
     #parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/logs/example_backbone/runs/2026-02-02_pretrained_from_paper/gen_samples/showers.parquet')
-    parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_5.pth')
+    parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_6.pth')
     #parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-06_clopodit_idl_mask/syn/combined_photon_samples.pth')
     parser.add_argument("--num_showers", type=int, default=-1, help="Number of showers to process (-1 for all)")
     args = parser.parse_args()

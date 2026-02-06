@@ -9,7 +9,7 @@ from torch.distributions import Normal
 from utils.file_utils import *
 from utils.visualize import *
 from utils.train_utils import *
-from datasets.transforms import PointCloudStandardScaler
+from datasets.transforms import PointCloudPhysicsScaler # PointCloudStandardScaler
 from model.calopodit import DiT, DiTConfig
 import torch.distributed as dist
 
@@ -119,7 +119,7 @@ def test(gpu, opt, output_dir, noises_init):
     train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
     dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=partial(pad_collate_fn, max_particles= train_dataset.max_particles))
     # Transforms
-    scaler = PointCloudStandardScaler(train_dataset.stats)    
+    scaler = PointCloudPhysicsScaler(train_dataset.stats)    
 
 
     '''
@@ -214,7 +214,7 @@ def test(gpu, opt, output_dir, noises_init):
     # CFG Scale (Usually 2.0 to 7.0 for diffusion/flow)
     # 1.0 = No guidance (standard), 4.0 = Strong guidanc
     #TODO create args for cfg scale
-    cfg_scale = 6.0
+    cfg_scale = 2.0
     masks =[]
     xs = []
     recons = []
@@ -222,8 +222,8 @@ def test(gpu, opt, output_dir, noises_init):
     model.eval()
     with torch.no_grad():
         for i, data in enumerate(dataloader):
-            if i < 74:
-                continue
+            # if i < 74:
+            #     continue
             if opt.dataname == 'g4' or opt.dataname == 'idl':
                 x, mask, int_energy, y, gap_pid, idx = data
                 gap_pid = gap_pid.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
@@ -307,11 +307,11 @@ def test(gpu, opt, output_dir, noises_init):
                 # Plotting (only needs to be done on master)
                 # Note: plot_4d_reconstruction might need CPU tensors
                 plot = False
-                if plot:
+                if i == 0 and gpu == 0:
                     plot_4d_reconstruction(
                         x.transpose(1,2), 
                         pts.transpose(1,2), 
-                        savepath=f"{opt.pthsave}/reconstruction_gpu_{gpu}_batch_{i}.png", 
+                        savepath=f"{opt.pthsave}reconstruction_gpu_{gpu}_batch_{i}.png", 
                         index=0
                     )
                 if gpu == 0:
@@ -415,7 +415,7 @@ def parse_args():
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=20, help='input batch size')
+    parser.add_argument('--bs', type=int, default=30, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)

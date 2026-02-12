@@ -9,7 +9,13 @@ from rectified_flow.rectified_flow import RectifiedFlow
 from utils.train_utils import *
 
 
-def measure_generation_speed(model, euler_sampler, num_steps, name="Model"):
+def measure_generation_speed(model, 
+                             euler_sampler, 
+                             num_steps, 
+                             name="Model", 
+                             BATCH_SIZE= 36, 
+                             NUM_POINTS=1700, 
+                             DEVICE=None):
     print(f"\n--- Benchmarking {name} ({num_steps} steps) ---")
     
     # 1. Create Synthetic Inputs (Bypassing Dataset)
@@ -19,8 +25,9 @@ def measure_generation_speed(model, euler_sampler, num_steps, name="Model"):
     # Synthetic Conditions (e.g., all class 0, energy 100 GeV)
     y = torch.zeros(BATCH_SIZE, dtype=torch.long, device=DEVICE)
     gap = torch.zeros(BATCH_SIZE, dtype=torch.long, device=DEVICE)
-    energy = torch.ones(BATCH_SIZE, 1, device=DEVICE) * 100.0
-    mask = torch.ones(BATCH_SIZE, NUM_POINTS, device=DEVICE) # No padding for benchmark
+    energy = torch.ones(BATCH_SIZE, 1, device=DEVICE) #* 100.0
+    #mask = torch.zeros((len(showers_list), max_particles), dtype=torch.bool, device= device)
+    mask = torch.zeros((BATCH_SIZE, NUM_POINTS), dtype= torch.bool, device=DEVICE) # No padding for benchmark
     
     # Warm-up pass (to initialize CUDA kernels, ignore this in timing)
     _ = euler_sampler.sample_loop(
@@ -33,8 +40,13 @@ def measure_generation_speed(model, euler_sampler, num_steps, name="Model"):
     start_time = time.perf_counter()
     
     traj = euler_sampler.sample_loop(
-        x_0=x_0, y=y, gap=gap, energy=energy, mask=mask, 
-        num_samples=BATCH_SIZE, num_steps=num_steps,
+        x_0=x_0, 
+        y=y, 
+        gap=gap, 
+        energy=energy, 
+        mask=None, 
+        num_samples=BATCH_SIZE, 
+        num_steps=num_steps,
         cfg_scale=1.0 # Keep CFG=1.0 for fair speed comparison
     )
     
@@ -51,25 +63,6 @@ def measure_generation_speed(model, euler_sampler, num_steps, name="Model"):
     print(f"Throughput: {samples_per_sec:.2f} samples/sec")
     
     return total_time
-
-def run_benchmark(ckpt_path, num_steps, name):
-    # Initialize Config and Model (Reuse your classes)
-    config = DiTConfig(num_points=NUM_POINTS, hidden_size=128, depth=13) 
-    model = DiT(config).to(DEVICE)
-    
-    # Load Weights
-    print(f"Loading weights from {ckpt_path}")
-    ckpt = torch.load(ckpt_path, map_location=DEVICE)
-    state_dict = {k.replace('module.', ''): v for k, v in ckpt['model_state'].items()}
-    model.load_state_dict(state_dict)
-    model.eval()
-    
-    # Setup Sampler
-    # Assuming RectifiedFlow class is available in your scope
-    rf = RectifiedFlow(velocity_field=model, data_shape=(NUM_POINTS, 4))
-    sampler = MyEulerSampler(rectified_flow=rf)
-    
-    return measure_generation_speed(model, sampler, num_steps, name)
 
 def load_model_on_gpu(ckpt_path, config):
     """
@@ -97,59 +90,6 @@ def load_model_on_gpu(ckpt_path, config):
     
     print(f"Model successfully loaded on {DEVICE}")
     return model
-
-# def benchmark_sweep(model, name):
-#     results = []
-    
-#     # Setup the Rectified Flow wrapper and Sampler
-#     # Assuming these classes are defined in your environment
-#     rf = RectifiedFlow(velocity_field=model, data_shape=(NUM_POINTS, 4))
-#     sampler = MyEulerSampler(rectified_flow=rf)
-
-#     # Synthetic Inputs (Generated once to keep benchmarking consistent)
-#     x_0 = torch.randn(BATCH_SIZE, NUM_POINTS, 4, device=DEVICE)
-#     y = torch.zeros(BATCH_SIZE, dtype=torch.long, device=DEVICE)
-#     gap = torch.zeros(BATCH_SIZE, dtype=torch.long, device=DEVICE)
-#     energy = torch.ones(BATCH_SIZE, 1, device=DEVICE) * 50.0 
-#     mask = torch.ones(BATCH_SIZE, NUM_POINTS, device=DEVICE)
-
-#     print(f"\n--- Sweeping {name} ---")
-
-#     for steps in STEPS_TO_TEST:
-#         # Warm-up pass: ensure CUDA kernels are initialized and memory is allocated
-#         with torch.no_grad():
-#             _ = sampler.sample_loop(x_0=x_0, y=y, gap=gap, energy=energy, mask=mask, num_steps=1)
-#         torch.cuda.synchronize()
-
-#         # Timing
-#         start = time.perf_counter()
-#         with torch.no_grad():
-#             traj = sampler.sample_loop(
-#                 x_0=x_0, y=y, gap=gap, energy=energy, mask=mask, 
-#                 num_samples=BATCH_SIZE, num_steps=steps, cfg_scale=1.0
-#             )
-#         torch.cuda.synchronize() # Ensures we measure GPU execution, not just CPU launch
-#         end = time.perf_counter()
-
-#         # Metrics calculation
-#         total_time = end - start
-#         throughput = BATCH_SIZE / total_time
-#         gen_mean_energy = traj.x_t[..., 3].mean().item()
-
-#         results.append({
-#             "Steps": steps,
-#             "Latency_ms": (total_time / BATCH_SIZE) * 1000,
-#             "Throughput": throughput,
-#             "Energy_Consistency": gen_mean_energy
-#         })
-#         print(f"Steps: {steps:>3} | Latency: {results[-1]['Latency_ms']:>6.2f}ms | Throughput: {throughput:>6.2f} samples/s")
-
-#     return pd.DataFrame(results)
-
-# import torch
-# import time
-# import pandas as pd
-# from dataclasses import dataclass
 
 def benchmark_sweep(ckpt_path, name, config):
 
@@ -217,29 +157,28 @@ if __name__ == "__main__":
     # Define your model configuration
 
     # --- BENCHMARK CONFIG ---
-    BATCH_SIZE = 128
-    NUM_POINTS = 500
-    NUM_STEPS_BASE = 100   # Standard Model steps
-    NUM_STEPS_REFLOW = 1   # Reflow Model target steps
+    BATCH_SIZE = 24
+    NUM_POINTS = 1000
+    NUM_STEPS = 1   # Reflow Model target steps
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Note: Ensure these match the weights you are loading!
     # Path to your weights
-    path_base = "path/to/stage1_model.pt"
-    path_reflow = "path/to/reflow_model.pt"
+    path_base = "output/train_calopodit/2026-02-06-07_train_w_ta/epoch_18.pth"
+    path_reflow = "output/train_calopodit/2026-02-11-05_reflow_dropout/epoch_19.pth"
     
     DiT_config = DiTConfig(
             #Point transformer config
             k = 16,
             nblocks =  4,
             name= "calopodit",
-            num_points = opt.npoints,
+            num_points = NUM_POINTS,
             energy_cond = True,#opt.energy_cond,
-            in_features=opt.nc,
+            in_features=4,
             transformer_features = 128, #512 = hidden_size in current implementation
             #DiT config
-            num_classes = opt.num_classes if hasattr(opt, 'num_classes') else 0,
-            gap_classes = opt.gap_classes if hasattr(opt, 'gap_classes') else 0,
+            num_classes = 0,
+            gap_classes = 2,
             out_channels=4, #opt.out_channels,
             hidden_size=128,
             depth=13,
@@ -247,38 +186,71 @@ if __name__ == "__main__":
             mlp_ratio=4,
             use_long_skip=True,
         )
-    
-    # 1. Benchmark Base Model (Stage 1)
-    base_model = load_model_on_gpu("path/to/base_model.pt", DiT_config)
+        
+    use_model = "reflow" #base
+    name = use_model
+    data_shape = (NUM_POINTS, 4)  # (N, 4) 4 for (x,y,z,energy)
 
-
-    data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
-    rectified_flow = RectifiedFlow(
+    if use_model == "reflow":
+        model = load_model_on_gpu(path_reflow, DiT_config)
+        model.eval()
+        rectified_flow = RectifiedFlow(
         data_shape=data_shape,
-        interp=opt.interp,
-        source_distribution=opt.source_distribution,
-        is_independent_coupling=opt.is_independent_coupling,
-        train_time_distribution=opt.train_time_distribution,
-        train_time_weight=opt.train_time_weight,
-        criterion=rf_criterion, #opt.criterion,
+        interp="straight",
+        source_distribution="normal",
+        is_independent_coupling=True,
+        train_time_distribution="uniform",
+        train_time_weight="uniform",
+        criterion="mse", #opt.criterion,
         velocity_field=model,
         #device=accelerator.device,
         dtype=torch.float32,
-    )
+        )
 
-    euler_sampler = MyEulerSampler(
+        rectified_flow.device = DEVICE
+        euler_sampler = MyEulerSampler(
                             rectified_flow=rectified_flow,
                         )
-                
-    # Benchmark Base
-    time_base = run_benchmark(path_base, NUM_STEPS_BASE, "Base Model")
+            
+
+    elif use_model == "base":
+        model = load_model_on_gpu(path_base, DiT_config)
+        model.eval()
+        rectified_flow = RectifiedFlow(
+            data_shape=data_shape,
+            interp="straight",
+            source_distribution="normal",
+            is_independent_coupling=True,
+            train_time_distribution="uniform",
+            train_time_weight="uniform",
+            criterion="mse", #opt.criterion,
+            velocity_field=model,
+            #device=accelerator.device,
+            dtype=torch.float32,
+        )
+        
+        rectified_flow.device = DEVICE
+        euler_sampler = MyEulerSampler(
+                                rectified_flow=rectified_flow,
+                            )
+    else:
+        model = None
+        euler_sampler = None
+        print(f"pick a set of weights.")
     
-    # Benchmark Reflow
-    time_reflow = run_benchmark(path_reflow, NUM_STEPS_REFLOW, "Reflow Model")
+
+    
+    time_step = measure_generation_speed(model,
+                                        euler_sampler, 
+                                        NUM_STEPS, 
+                                        name, 
+                                        DEVICE=DEVICE, 
+                                        BATCH_SIZE=BATCH_SIZE)
+
     
     # Comparison
-    improvement = time_base / time_reflow
-    print(f"\nSPEEDUP: Reflow is {improvement:.1f}x faster than Base Model.")
+    #improvement = time_base / time_reflow
+    print(f"\nSPEED: model {use_model} is {time_step}.") #{time_step:.1f}
     #Benachmark sweep spot
     # df_base = benchmark_sweep("path/to/base_model.pt", "Base Model")
     # df_reflow = benchmark_sweep("path/to/reflow_model.pt", "Reflow Model")

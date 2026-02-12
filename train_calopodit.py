@@ -326,7 +326,6 @@ def train(gpu, opt, output_dir):
     # 1. Calculate Total Training Steps
     # (Make sure to account for gradient accumulation if you use it, though your code doesn't seem to)
     
-    start_epoch = 0  # FIXME: Hardcoded for reflow
     #TODO Add flag to change between OneCicleLR for short runs and CosineAnnealingLR for longer runs
     steps_per_epoch = len(dataloader)
     total_steps = (opt.niter -start_epoch)* steps_per_epoch
@@ -339,8 +338,8 @@ def train(gpu, opt, output_dir):
 
     lr_scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
-        #max_lr=1e-4,             # Peak LR (Try 1e-4 if 3e-4 is still unstable)
-        max_lr=1e-5,             #FIXME Reflow
+        max_lr=5e-5,  # Peak LR (Try 1e-4 if 3e-4 is still unstable)
+        #max_lr= 1e-5, 
         total_steps=total_steps, # Exact number of batch updates
         pct_start=0.2,           # Warmup for first 20% (2 epochs)
         anneal_strategy='cos',   # Cosine shape
@@ -460,13 +459,15 @@ def train(gpu, opt, output_dir):
                         #noises_batch = noises_batch.cuda()
                     
                     optimizer.zero_grad()
-
+                    
                     #Transform
                     if opt.is_independent_coupling:  #rectified flow dataset saved normalized, so we need to transform here.
                         x_1 = scaler.transform(x, mask=mask)
+                        rectified_flow.device = x.device      
                         x_0 = rectified_flow.sample_source_distribution(x_1.shape[0])
-                    
-                    rectified_flow.device = x_1.device      
+                    else:
+                        rectified_flow.device = x_1.device      
+
                     if debug:
                         means = x_1.mean(dim=0)
                         stds= x_1.std(dim=0)
@@ -652,21 +653,22 @@ def main():
 
 
 def parse_args():
+   #NOTE regular python train_calopodit.py --model_ckpt output/train_calopodit/2026-02-06-07_train_w_ta/epoch_18.pth --niter 10 --num_steps 500 
    #NOTE REFLOW python train_calopodit.py --model_ckpt output/train_calopodit/2026-02-09-17-27-32/epoch_19.pth --niter 80 --no_independent_coupling --num_steps 300 --dropout 0.0 
     parser = argparse.ArgumentParser()
     ''' Data '''
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/w_sim')# Training single class
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/')# Training two class
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/') #Finetuning
-    parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/reflow/combined_batches_reflow_calopodit_Normalized_Feb_10_500_steps.pth') #Reflow
+    #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/reflow/combined_batches_reflow_calopodit_Normalized_Feb_10_500_steps.pth') #Reflow
     parser.add_argument('--category', default='all', help='category of dataset')
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/reflow/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=50, help='input batch size')
+    parser.add_argument('--bs', type=int, default=72, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)

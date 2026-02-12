@@ -90,7 +90,7 @@ def plot_loss_from_log(file_path):
         plt.show() # Fallback to showing plot if save fails
 
 if __name__ == "__main__":
-    log_file = "/global/homes/c/ccardona/PSF2/PSF/output/train_calopodit/2026-02-11-05-27-13/output.log"
+    log_file = "/global/homes/c/ccardona/PSF2/PSF/output/train_calopodit/2026-02-12-09-38-57/output.log"
     
     if len(sys.argv) > 1:
         log_file = sys.argv[1]

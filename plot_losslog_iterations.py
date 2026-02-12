@@ -28,12 +28,14 @@ def plot_loss_from_log(file_path):
     losses = []
     
     # Regex to parse the log line
-    pattern = re.compile(r'\[\s*(\d+)[^\]]*\]\[\s*(\d+)/(\d+)\]\s+loss:\s+([\d\.]+)')
+    #pattern = re.compile(r'\[\s*(\d+)[^\]]*\]\[\s*(\d+)/(\d+)\]\s+loss:\s+([\d\.]+)')
+    pattern = re.compile(r'\[\s*(\d+)[^\]]*\]\[\s*(\d+)\s*/\s*(\d+)\]\s+loss:\s+([\d\.]+)')
 
     try:
         with open(file_path, 'r') as f:
             for line in f:
                 match = pattern.search(line)
+                
                 if match:
                     epoch = int(match.group(1))
                     curr_iter = int(match.group(2))
@@ -54,7 +56,7 @@ def plot_loss_from_log(file_path):
 
     # --- SMOOTHING LOGIC ---
     # Define how many points to average over (adjust this to make it smoother/sharper)
-    window_size = 200
+    window_size = 40
     smoothed_losses = calculate_moving_average(losses, window_size)
     
     # Adjust iterations to match the length of smoothed data 
@@ -88,7 +90,7 @@ def plot_loss_from_log(file_path):
         plt.show() # Fallback to showing plot if save fails
 
 if __name__ == "__main__":
-    log_file = "/global/homes/c/ccardona/PSF2/PSF/output/train_calopodit/2026-02-06-07-02-00/output.log"
+    log_file = "/global/homes/c/ccardona/PSF2/PSF/output/train_calopodit/2026-02-11-05-27-13/output.log"
     
     if len(sys.argv) > 1:
         log_file = sys.argv[1]

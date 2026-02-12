@@ -12,7 +12,7 @@ from rectified_flow.flow_components.loss_function import RectifiedFlowLossFuncti
 import numpy as np
 import torch.nn.functional as F
 import awkward as ak
-from phys_plotting import plot_paper_plots
+from OmniJetAlphaC_phys_plotting import plot_paper_plots
 import matplotlib.pyplot as plt
 
 
@@ -296,6 +296,40 @@ class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
 
         return loss
     
+@torch.no_grad()
+def validate_reflow_straightness(model, rectified_flow, val_batch, scaler):
+    model.eval()
+    # val_batch: (x_1_raw, x_0_raw, mask, energy, y, gap)
+    x_1_raw, x_0_raw, mask, energy, y, gap, _ = val_batch
+    
+    # 1. Prepare Inputs
+    # IMPORTANT: We use the noise x_0 that the model was trained on!
+    # No scaler on x_0!
+    x_0 = x_0_raw.cuda() 
+    
+    # 2. Run deterministic Euler with very few steps (e.g., 5 or 10)
+    # If paths are straight, 5 steps is plenty!
+    num_steps = 5 
+    dt = 1.0 / num_steps
+    x_t = x_0.clone()
+    
+    for i in range(num_steps):
+        t = i / num_steps
+        t_batch = torch.full((x_0.shape[0],), t, device=x_0.device)
+        
+        # Get velocity (No CFG for this diagnostic)
+        v_t = model(x=x_t, t=t_batch, y=y.cuda(), gap=gap.cuda(), energy=energy.cuda(), mask=mask.cuda())
+        
+        x_t = x_t + v_t * dt
+        x_t = x_t * mask.cuda().unsqueeze(-1) # Keep padding clean
+
+    # 3. Convert back to raw physics units
+    x_gen_raw = scaler.inverse_transform(x_t, mask=mask.cuda())
+    
+    # 4. Metric: MSE between Generated x_1 and Ground Truth x_1
+    reflow_error = F.mse_loss(x_gen_raw, x_1_raw.cuda())
+    return reflow_error, x_gen_raw
+
 def enforce_energy_conservation(samples, target, energy_idx=-1, eps=1e-6):
     """
     Scales the energy channel of generated points so their sum matches the target energy.

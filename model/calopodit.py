@@ -726,7 +726,7 @@ class DiT(nn.Module):
 
         return model
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, y=None, gap=None, energy=None, mask=None, force_drop_ids=None):
+    def forward(self, x: torch.Tensor, t: torch.Tensor, y=None, gap=None, energy=None, mask=None, force_drop_ids=None, cfg_scale=None):
         """
         Forward pass of DiT.
         x: (N, Points, C) tensor of spatial point inputs 

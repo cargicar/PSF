@@ -600,7 +600,8 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
                 material_list=["G4_Ta","G4_W","G4_Pb"],
                 material = "G4_W",
                 num_showers=-1,
-                title= None):
+                title= None,
+                enforce_conservation = False):
     #filepath[0] : simulation data
     #filepath[1] : generated data
     #os.makedirs("Plots",exist_ok=True)
@@ -608,7 +609,7 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
 
     #for material in material_list:
     if isinstance(file_paths, list):
-        generated_features, ground_truth_features = read_generated(file_paths, material_list, num_showers, material, enforce_conservation = False)
+        generated_features, ground_truth_features = read_generated(file_paths, material_list, num_showers, material, enforce_conservation = enforce_conservation)
     else:
         generated_features, ground_truth_features = read_generated_pth(file_paths, num_showers)
     fig = plot_paper_plots(
@@ -628,13 +629,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot generated showers vs ground truth")
     #parser.add_argument("--file_path", type=str, required=True, help="Path to the HDF5 file containing generated showers")
     if material == "G4_W":
-        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/w_sim/photon-shower-1_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
+        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/w_sim/photon-shower-2_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
     if material == "G4_Ta":
-        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/ta_sim/photon-shower-1_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
+        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/ta_sim/photon-shower-2_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
         #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Jan_17.pth') # For the case when we can to read original and generated from the same pth file
     parser.add_argument('--title', default=f'phys_metrics_calopodit_{date_str}_{material}')
     #parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/logs/example_backbone/runs/2026-02-02_pretrained_from_paper/gen_samples/showers.parquet')
-    parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_6.pth')
+    parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_Reflow_calopodit_UnNormalized_Feb_11_2_steps.pth')
     #parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-06_clopodit_idl_mask/syn/combined_photon_samples.pth')
     parser.add_argument("--num_showers", type=int, default=-1, help="Number of showers to process (-1 for all)")
     args = parser.parse_args()
@@ -643,4 +644,4 @@ if __name__ == "__main__":
         filepaths = args.dataroot
     else:
         filepaths = [args.dataroot, args.genroot]
-    make_plots(filepaths, num_showers=args.num_showers, title = args.title, material= material)
+    make_plots(filepaths, num_showers=args.num_showers, title = args.title, material= material, enforce_conservation=False)

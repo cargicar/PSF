@@ -152,6 +152,35 @@ def test(gpu, opt, output_dir, noises_init):
     else:
         print(f"Model {opt.model_name} not implemented")
     
+
+    if opt.model_ckpt != '':
+        print(f"Loading checkpoint from {opt.model_ckpt}...")
+        ckpt = torch.load(opt.model_ckpt, map_location='cpu') # Always load to CPU first to avoid GPU OOM
+        state_dict = ckpt['model_state']
+
+        # ---STRIP 'module.' PREFIX ---
+        # Check if the checkpoint was saved from DDP
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('module.'):
+                name = k[7:] # remove 'module.'
+            else:
+                name = k
+            new_state_dict[name] = v
+        # -----------------------------------
+
+        try:
+            # Load the CLEANED state dict
+            model.load_state_dict(new_state_dict, strict=True)
+            print("Model loaded successfully.")
+        except RuntimeError as e:
+            print(f"Strict loading failed: {e}")
+            print("Attempting non-strict loading (ignoring missing/unexpected keys)...")
+            # Load the CLEANED state dict
+            model.load_state_dict(new_state_dict, strict=False)
+        #optimizer.load_state_dict(ckpt['optimizer_state'])
+
+    
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
         def _transform_(m):
             return nn.parallel.DistributedDataParallel(
@@ -178,12 +207,6 @@ def test(gpu, opt, output_dir, noises_init):
 
     if should_diag:
         logger.info(opt)
-
-
-    if opt.model_ckpt != '':
-        ckpt = torch.load(opt.model_ckpt)
-        model.load_state_dict(ckpt['model_state'])
-        #optimizer.load_state_dict(ckpt['optimizer_state'])
 
     # def new_x_chain(x, num_chain):
     #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
@@ -214,7 +237,8 @@ def test(gpu, opt, output_dir, noises_init):
     # CFG Scale (Usually 2.0 to 7.0 for diffusion/flow)
     # 1.0 = No guidance (standard), 4.0 = Strong guidanc
     #TODO create args for cfg scale
-    cfg_scale = 2.0
+    #cfg_scale = 2.0
+    cfg_scale = 1.0
     masks =[]
     xs = []
     recons = []
@@ -222,7 +246,7 @@ def test(gpu, opt, output_dir, noises_init):
     model.eval()
     with torch.no_grad():
         for i, data in enumerate(dataloader):
-            # if i < 74:
+            # if i < 132:
             #     continue
             if opt.dataname == 'g4' or opt.dataname == 'idl':
                 x, mask, int_energy, y, gap_pid, idx = data
@@ -257,10 +281,11 @@ def test(gpu, opt, output_dir, noises_init):
                 scaler = scaler.cuda()
                 #noises_batch = noises_batch.cuda()
             
-            rectified_flow.device = x.device      
-            
             #Transform
             x_1 = scaler.transform(x, mask=mask)
+
+            rectified_flow.device = x.device      
+            x_0 = rectified_flow.sample_source_distribution(x_1.shape[0])
 
             t = rectified_flow.sample_train_time(x_1.shape[0])
             t= t.squeeze()
@@ -284,7 +309,7 @@ def test(gpu, opt, output_dir, noises_init):
                 # Sample method
                 #FIXME we should be using a validatioon small dataset instead
                 traj1 = euler_sampler.sample_loop(
-                    seed=233,
+                    x_0=x_0,
                     y=y,
                     gap= gap_pid,
                     energy=int_energy,
@@ -299,9 +324,12 @@ def test(gpu, opt, output_dir, noises_init):
                 # Un-Normalize back to real physics units
                 pts = scaler.inverse_transform(pts_norm, mask=mask)
                 #if gpu == 0:
-                save_path = f'{opt.pthsave}_calopodit_gen_gapclasses_sample_w_ta_Feb_5_rank_{gpu}_batch_{i}.pth'
-                #torch.save([final_xs.cpu(), final_recons.cpu(), final_masks.cpu(), final_gaps.cpu()], save_path)  
-                torch.save([x.cpu(), pts.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path)  
+                save_path = f'{opt.pthsave}_calopodit_samples_Reflow_normalized_Feb_11_1_steps_rank_{gpu}_batch_{i}.pth'
+                save_path2 = f'{opt.pthsave}_calopodit_samples_Reflow_unNormalized_Feb_11_2_steps_rank_{gpu}_batch_{i}.pth'
+                
+                #NOTE saving un-normalized for reflow
+                #torch.save([x_0.cpu(), pts_norm.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path)  
+                torch.save([x.cpu(), pts.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path2)  
                 print(f"Batch data saved to {save_path}")
                 
                 # Plotting (only needs to be done on master)
@@ -311,7 +339,7 @@ def test(gpu, opt, output_dir, noises_init):
                     plot_4d_reconstruction(
                         x.transpose(1,2), 
                         pts.transpose(1,2), 
-                        savepath=f"{opt.pthsave}reconstruction_gpu_{gpu}_batch_{i}.png", 
+                        savepath=f"{opt.pthsave}/reconstruction_gpu_{gpu}_batch_{i}.png", 
                         index=0
                     )
                 if gpu == 0:
@@ -411,11 +439,12 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
     parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/')# Training
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/')
-    parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
+    #parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
+    parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/') #reflow
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=30, help='input batch size')
+    parser.add_argument('--bs', type=int, default=36, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)

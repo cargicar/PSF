@@ -269,20 +269,43 @@ def train(gpu, opt, output_dir):
         print(f"Model {opt.model_name} not implemented or not included in this script")
     
     
-    #Load model checkpoint and define optimizer
+    # Load model checkpoint and define optimizer
     if opt.model_ckpt != '':
         if opt.fine_tuning:
+            # Your existing fine-tuning logic
             model = load_checkpoint_with_gap_surgery(model, opt.model_ckpt, new_gap_classes=opt.gap_classes) 
-            optimizer = fine_tuning_modulate(model, lr= opt.lr*0.1, decay=opt.decay)
+            optimizer = fine_tuning_modulate(model, lr=opt.lr*0.1, decay=opt.decay)
         else:
-            ckpt = torch.load(opt.model_ckpt)
-            model.load_state_dict(ckpt['model_state'])
-            #optimizer.load_state_dict(ckpt['optimizer_state'])
-            optimizer= optim.AdamW(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
-            #if 'scaler_state' in ckpt: 
-            #    scaler.load_state_dict(ckpt['scaler_state'])
+            print(f"Loading checkpoint from {opt.model_ckpt}...")
+            ckpt = torch.load(opt.model_ckpt, map_location='cpu') # Always load to CPU first to avoid GPU OOM
+            state_dict = ckpt['model_state']
+
+            # Check if the checkpoint was saved from DDP
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                if k.startswith('module.'):
+                    name = k[7:] # remove 'module.'
+                else:
+                    name = k
+                new_state_dict[name] = v
+            # -----------------------------------
+
+            try:
+                model.load_state_dict(new_state_dict, strict=True)
+                print("Model loaded successfully.")
+            except RuntimeError as e:
+                # If strict loading fails, it might be due to architecture changes 
+                # (e.g., adding CrossAttn or PointEmbedder to an old checkpoint).
+                print(f"Strict loading failed: {e}")
+                print("Attempting non-strict loading (ignoring missing/unexpected keys)...")
+                model.load_state_dict(new_state_dict, strict=False)
+
+    optimizer = optim.AdamW(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
+    if opt.model_ckpt != '':
+        start_epoch = torch.load(opt.model_ckpt)['epoch'] + 1
     else:
-        optimizer= optim.AdamW(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
+        start_epoch = 0
+    print(f"Starting training from epoch {start_epoch}...")
 
     #Schedulers
     # 1. Warmup for first 5 epochs (or ~1000 steps)
@@ -302,9 +325,11 @@ def train(gpu, opt, output_dir):
     # One CicleLR for short runs
     # 1. Calculate Total Training Steps
     # (Make sure to account for gradient accumulation if you use it, though your code doesn't seem to)
+    
+    start_epoch = 0  # FIXME: Hardcoded for reflow
     #TODO Add flag to change between OneCicleLR for short runs and CosineAnnealingLR for longer runs
     steps_per_epoch = len(dataloader)
-    total_steps = opt.niter * steps_per_epoch
+    total_steps = (opt.niter -start_epoch)* steps_per_epoch
 
     # 2. Define the Scheduler
     # max_lr: The peak learning rate. Since 1e-3 was unstable, let's try 1e-4 or 3e-4.
@@ -314,17 +339,14 @@ def train(gpu, opt, output_dir):
 
     lr_scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=1e-4,             # Peak LR (Try 1e-4 if 3e-4 is still unstable)
+        #max_lr=1e-4,             # Peak LR (Try 1e-4 if 3e-4 is still unstable)
+        max_lr=1e-5,             #FIXME Reflow
         total_steps=total_steps, # Exact number of batch updates
         pct_start=0.2,           # Warmup for first 20% (2 epochs)
         anneal_strategy='cos',   # Cosine shape
         div_factor=25.0,         # Starts at 3e-4 / 25 = 1.2e-5
         final_div_factor=100.0,  # Ends at 1.2e-5 / 100 = 1.2e-7
     )
-    if opt.model_ckpt != '':
-        start_epoch = torch.load(opt.model_ckpt)['epoch'] + 1
-    else:
-        start_epoch = 0
 
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
         def _transform_(m):
@@ -393,12 +415,13 @@ def train(gpu, opt, output_dir):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         if opt.is_independent_coupling:
                             x, mask, int_energy, y, gap_pid, idx = data
+                            #TODO I am just gonna used Ta to reflow, correct this later
                             gap_pid = gap_pid.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
                             y = y.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
                         else:
-                            print(f"independent coupling is reflow={opt.is_independent_coupling}")
-                            #torch.save([x.cpu(), pts.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path)  
-                            x, x_0, int_energy, gap_pid, idx = data
+                            #NOTE reflow pairs have been saved normalized
+                            #idl_dataset.reflow: [x_0.cpu(), pts_norm.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()]
+                            x_0, x_1, mask, int_energy, y, gap_pid, idx = data
                             gap_pid = gap_pid.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
                             #y = y.long()
 
@@ -412,7 +435,11 @@ def train(gpu, opt, output_dir):
                         #noises_batch = noises_init[data['idx']].transpose(1,2)
                     
                     if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
-                        x = x.cuda(gpu,  non_blocking=True)
+                        if opt.is_independent_coupling:
+                            x = x.cuda(gpu,  non_blocking=True)
+                        else:
+                            x_0 = x_0.cuda(gpu,  non_blocking=True)
+                        x_1 = x_1.cuda(gpu,  non_blocking=True) if not opt.is_independent_coupling else None
                         mask = mask.cuda(gpu,  non_blocking=True)
                         y = y.cuda(gpu,  non_blocking=True)
                         gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
@@ -420,7 +447,11 @@ def train(gpu, opt, output_dir):
                         scaler = scaler.cuda(gpu)
                         #noises_batch = noises_batch.cuda(gpu)
                     elif opt.distribution_type == 'single':
-                        x = x.cuda()
+                        if opt.is_independent_coupling:
+                            x = x.cuda()
+                        else:
+                            x_0 = x_0.cuda()
+                        x_1 = x_1.cuda() if not opt.is_independent_coupling else None
                         mask = mask.cuda()
                         y = y.cuda()
                         gap_pid = gap_pid.cuda()
@@ -428,12 +459,14 @@ def train(gpu, opt, output_dir):
                         scaler = scaler.cuda()
                         #noises_batch = noises_batch.cuda()
                     
-                    rectified_flow.device = x.device      
                     optimizer.zero_grad()
 
                     #Transform
-                    x_1 = scaler.transform(x, mask=mask)
+                    if opt.is_independent_coupling:  #rectified flow dataset saved normalized, so we need to transform here.
+                        x_1 = scaler.transform(x, mask=mask)
+                        x_0 = rectified_flow.sample_source_distribution(x_1.shape[0])
                     
+                    rectified_flow.device = x_1.device      
                     if debug:
                         means = x_1.mean(dim=0)
                         stds= x_1.std(dim=0)
@@ -447,8 +480,6 @@ def train(gpu, opt, output_dir):
                             print("Normalization looks healthy.")
 
                     #with autocast(enabled=True):
-                    if opt.is_independent_coupling:
-                        x_0 = rectified_flow.sample_source_distribution(x_1.shape[0])
                     if opt.model_name == "pvcnn2":
                         x_0 = x_0.transpose(1,2)
                     t = rectified_flow.sample_train_time(x_1.shape[0])
@@ -457,7 +488,7 @@ def train(gpu, opt, output_dir):
                     #CFG
                     batch_size = x_1.shape[0]
                     if p_drop > 0:
-                        force_drop_ids = torch.bernoulli(torch.full((batch_size,), p_drop, device=x.device)).bool()
+                        force_drop_ids = torch.bernoulli(torch.full((batch_size,), p_drop, device=x_1.device)).bool()
                     else:
                         force_drop_ids = None
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
@@ -561,25 +592,34 @@ def train(gpu, opt, output_dir):
                 if (epoch + 1) % opt.saveIter == 0:
 
                     if should_diag:
+                        # In your train loop, inside the saving block:
+                        model_to_save = model.module if hasattr(model, "module") else model
 
                         save_dict = {
                             'epoch': epoch,
-                            'model_state': model.state_dict(),
+                            'model_state': model_to_save.state_dict(), # Saves raw keys 'layer_name...'
                             'optimizer_state': optimizer.state_dict()
                         }
-
                         torch.save(save_dict, '%s/epoch_%d.pth' % (output_dir, epoch))
 
 
+                    # if opt.distribution_type == 'multi':
+                    #     dist.barrier()
+                    #     map_location = {'cuda:%d' % 0: 'cuda:%d' % gpu}
+                    #     model.load_state_dict(
+                    #         torch.load('%s/epoch_%d.pth' % (output_dir, epoch), map_location=map_location)['model_state'])
                     if opt.distribution_type == 'multi':
                         dist.barrier()
                         map_location = {'cuda:%d' % 0: 'cuda:%d' % gpu}
-                        model.load_state_dict(
-                            torch.load('%s/epoch_%d.pth' % (output_dir, epoch), map_location=map_location)['model_state'])
-    if gpu==0:
-        prof.export_memory_timeline(f"{out_prof}/memory_timeline.raw.json.gz", device=f"cuda:{gpu}")
-        prof.export_memory_timeline(f"{out_prof}/memory_timeline.html", device=f"cuda:{gpu}")
-    profiler_table_output(prof, output_filename=f"{out_prof}/cuda_memory_profile_rank{opt.rank}.txt")
+                        
+                        model.module.load_state_dict(
+                            torch.load('%s/epoch_%d.pth' % (output_dir, epoch), map_location=map_location)['model_state']
+                        )
+                        # -------------------
+    # if gpu==0:
+    #     prof.export_memory_timeline(f"{out_prof}/memory_timeline.raw.json.gz", device=f"cuda:{gpu}")
+    #     prof.export_memory_timeline(f"{out_prof}/memory_timeline.html", device=f"cuda:{gpu}")
+    # profiler_table_output(prof, output_filename=f"{out_prof}/cuda_memory_profile_rank{opt.rank}.txt")
     dist.destroy_process_group()
 
 def main():
@@ -612,20 +652,21 @@ def main():
 
 
 def parse_args():
-
+   #NOTE REFLOW python train_calopodit.py --model_ckpt output/train_calopodit/2026-02-09-17-27-32/epoch_19.pth --niter 80 --no_independent_coupling --num_steps 300 --dropout 0.0 
     parser = argparse.ArgumentParser()
     ''' Data '''
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/')# Training
+    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/w_sim')# Training single class
+    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/')# Training two class
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/') #Finetuning
-    #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Feb_2_sample_w.pth') #Reflow
+    parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/reflow/combined_batches_reflow_calopodit_Normalized_Feb_10_500_steps.pth') #Reflow
     parser.add_argument('--category', default='all', help='category of dataset')
-    parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
+    parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/reflow/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=40, help='input batch size')
+    parser.add_argument('--bs', type=int, default=50, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
@@ -660,7 +701,7 @@ def parse_args():
 
     #params
     parser.add_argument('--attention', default=True)
-    parser.add_argument('--dropout', default=0.1)
+    parser.add_argument('--dropout', type = float,  default=0.1)
     parser.add_argument('--embed_dim', type=int, default=64)
     parser.add_argument('--loss_type', default='mse')
     parser.add_argument('--model_mean_type', default='eps')
@@ -693,9 +734,9 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', type=int, default=4, help='unit: epoch')
-    parser.add_argument('--diagIter', type=int, default=4, help='unit: epoch')
-    parser.add_argument('--vizIter', type=int, default=80, help='unit: epoch')
+    parser.add_argument('--saveIter', type=int, default=20, help='unit: epoch')
+    parser.add_argument('--diagIter', type=int, default=20, help='unit: epoch')
+    parser.add_argument('--vizIter', type=int, default=8000, help='unit: epoch')
     parser.add_argument('--print_freq', type=int, default=32, help='unit: iter')
 
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')

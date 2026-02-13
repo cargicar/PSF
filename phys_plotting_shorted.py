@@ -32,6 +32,8 @@ from metrics.physics.plotting_utils import (
     plot_ratios
 )
 
+from join_samples_pth import combine_pth_files
+
 def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = None, material: str = None, **kwargs):
     """Plots the features of multiple constituent or shower sets.
 
@@ -625,6 +627,12 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
 if __name__ == "__main__":
     material = "G4_W"
     date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    target_directory = "/pscratch/sd/c/ccardona/datasets/pth/" 
+    pattern = "_calopodit_samples_Reflow_unNormalized_Feb_11_2_steps_rank_*.pth"
+    output_file = f"{target_directory}/combined_batches_calopodit_v2_UnNormalized_Feb_13_500_steps.pth"
+    
+    combine_pth_files(target_directory, output_file, pattern= pattern)
+
     import argparse
     parser = argparse.ArgumentParser(description="Plot generated showers vs ground truth")
     #parser.add_argument("--file_path", type=str, required=True, help="Path to the HDF5 file containing generated showers")
@@ -635,7 +643,7 @@ if __name__ == "__main__":
         #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Jan_17.pth') # For the case when we can to read original and generated from the same pth file
     parser.add_argument('--title', default=f'phys_metrics_calopodit_{date_str}_{material}')
     #parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/logs/example_backbone/runs/2026-02-02_pretrained_from_paper/gen_samples/showers.parquet')
-    parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_Reflow_calopodit_UnNormalized_Feb_11_2_steps.pth')
+    parser.add_argument('--genroot', default=output_file)
     #parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-06_clopodit_idl_mask/syn/combined_photon_samples.pth')
     parser.add_argument("--num_showers", type=int, default=-1, help="Number of showers to process (-1 for all)")
     args = parser.parse_args()

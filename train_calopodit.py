@@ -258,8 +258,8 @@ def train(gpu, opt, output_dir):
             num_classes = opt.num_classes if hasattr(opt, 'num_classes') else 0,
             gap_classes = opt.gap_classes if hasattr(opt, 'gap_classes') else 0,
             out_channels=4, #opt.out_channels,
-            hidden_size=128,
-            depth=13,
+            hidden_size=256,
+            depth=11,
             num_heads=8,
             mlp_ratio=4,
             use_long_skip=True,
@@ -668,7 +668,7 @@ def parse_args():
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/reflow/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=72, help='input batch size')
+    parser.add_argument('--bs', type=int, default=16, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
@@ -736,8 +736,8 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', type=int, default=20, help='unit: epoch')
-    parser.add_argument('--diagIter', type=int, default=20, help='unit: epoch')
+    parser.add_argument('--saveIter', type=int, default=4, help='unit: epoch')
+    parser.add_argument('--diagIter', type=int, default=4, help='unit: epoch')
     parser.add_argument('--vizIter', type=int, default=8000, help='unit: epoch')
     parser.add_argument('--print_freq', type=int, default=32, help='unit: iter')
 

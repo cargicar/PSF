@@ -388,51 +388,64 @@ class FourierSpatialEmbedder(nn.Module):
         
         return self.mlp(x_emb)
 #############################################################################3
-#               Point Embedder  (Unused)                                 #
+#               Point Embedder
 ##########################################################################
 class PointEmbedder(nn.Module):
     """
-    A stack of TransformerBlocks that acts as the 'Tokenizer' for the DiT.
-    It progressively lifts the input from raw coordinates to high-dim latent features.
-
-    Deeper Receptive Field: In Block 1, a point sees its k immediate neighbors. In Block 2, it sees neighbors of neighbors (indirectly), allowing it to understand larger shapes.
-
-    Dynamic Grouping: Because Block 2 calculates distances on the features output by Block 1 (not the XYZ coordinates), it effectively groups points that "look similar" in feature space, even if they aren't physically next to each other. This is the core strength of DGCNN-style architectures.
+    Improved Tokenizer for DiT. 
+    Uses a Deep Lifting MLP to preserve coordinate precision followed by 
+    Residual Transformer Blocks for local geometric feature extraction.
     """
     def __init__(self, config):
         super().__init__()
-        self.blocks = nn.ModuleList()
-        intermediate_dim = config.hidden_size // 2 # e.g., 64
-        # --- Block 1: Raw Input -> Hidden Size ---
-        # Input: (B, N, 4) -> Output: (B, N, 256)
-        self.blocks.append(TransformerBlock(
-            in_features=config.in_features,          # 4
-            transformer_features= intermediate_dim, # # 64 (Bottleneck dim)
-            d_model=config.hidden_size,              # 128
-            k=config.k                               # 8
-        ))
+        # 1. High-Precision Lifting
+        # We project raw (x,y,z,E) into a wider space first to avoid information bottleneck
+        self.lifting = nn.Sequential(
+            nn.Linear(config.in_features, config.hidden_size),
+            nn.SiLU(),
+            nn.Linear(config.hidden_size, config.hidden_size),
+            nn.LayerNorm(config.hidden_size)
+        )
         
-        # --- Block 2: Hidden Size -> Hidden Size ---
-        # Input: (B, N, 256) -> Output: (B, N, 256)
-        # Note: We increase transformer_features here to avoid compressing 
-        # the rich 256-dim features back down to 32 too aggressively.
-        # We generally want the internal dim to be closer to the d_model in deeper layers.
-        
-        self.blocks.append(TransformerBlock(
-            in_features=intermediate_dim, #config.hidden_size,      # 64 (Input from Block 1)
-            transformer_features=config.hidden_size, 
-            d_model=config.hidden_size,              # 128 (Maintains size)
+        # 2. Local Geometric Blocks
+        # We keep the stack of 2 blocks, but use more internal 'transformer_features' 
+        # to prevent compression artifacts.
+        #inner_dim = config.hidden_size // 2 #Not strictly neccesary, it just a bottleneck to reduce model parameters
+        inner_dim = config.hidden_size #This could be better for fidelity (?)
+        self.block1 = TransformerBlock(
+            in_features=config.hidden_size, 
+            transformer_features=inner_dim, 
+            d_model=config.hidden_size, 
             k=config.k
-        ))
+        )
+        
+        self.block2 = TransformerBlock(
+            in_features=config.hidden_size, 
+            transformer_features=inner_dim, 
+            d_model=config.hidden_size, 
+            k=config.k
+        )
 
     def forward(self, x, mask=None):
-        # x shape: (B, N, 4)
-        for block in self.blocks:
-            # Your TransformerBlock returns (features, attn_map)
-            # We only need 'features' for the next step
-            x, _ = block(x, mask=mask)
-            
-        return x # (B, N, 128)
+        """
+        x: (B, N, 4) -> raw points
+        """
+        # Step 1: Initial Lifting
+        # Lift raw coordinates to hidden_size dim
+        x = self.lifting(x) 
+        
+        # Step 2: First Geometric Pass
+        # Returns (features, attn). We use a residual connection here.
+        feat1, _ = self.block1(x, mask=mask)
+        x = x + feat1 
+        
+        # Step 3: Second Geometric Pass (Dynamic Graph)
+        # Neighbor lookup is now performed on the rich features from block1
+        feat2, _ = self.block2(x, mask=mask)
+        x = x + feat2
+        
+        return x # Returns (B, N, hidden_size)
+    
 #################################################################################
 #                                 Core DiT Model                                #
 #################################################################################
@@ -737,7 +750,7 @@ class DiT(nn.Module):
 
         # 2. Spatial Embeddings
         coords = x[..., :3] 
-        # FIX: Removed [0] index
+    
         x_features = self.x_embedder(x, mask=mask) 
         
         pos_emb = self.pos_embedder(coords)
@@ -763,6 +776,7 @@ class DiT(nn.Module):
             
         if hasattr(self, "e_embedder") and energy is not None:
             energy_emb = self.e_embedder(energy, self.training, force_drop_ids)
+            x= x + energy_emb.unsqueeze(1)
             context_tokens.append(energy_emb.unsqueeze(1)) 
             
         # Stack them along sequence dim: (B, Num_Conds, Hidden)

@@ -117,7 +117,8 @@ class TransformerBlock(nn.Module):
             nn.Linear(transformer_features, transformer_features)
         )
         self.fc1 = nn.Linear(transformer_features, d_model)
-        self.fc2 = nn.Linear(d_model, transformer_features)
+        #self.fc2 = nn.Linear(d_model, transformer_features)
+        self.fc2 = nn.Linear(d_model, in_features)
         self.fc_delta = nn.Sequential(
             nn.Linear(in_features, d_model),
             nn.ReLU(),

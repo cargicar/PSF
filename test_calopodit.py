@@ -87,6 +87,40 @@ def gather_distributed_tensor(tensor):
     # 5. Concatenate
     return torch.cat(clean_list, dim=0)
 
+@torch.no_grad()
+def validate_reflow_straightness(model, rectified_flow, val_batch, scaler):
+    model.eval()
+    # val_batch: (x_1_raw, x_0_raw, mask, energy, y, gap)
+    x_1_raw, x_0_raw, mask, energy, y, gap, _ = val_batch
+    
+    # 1. Prepare Inputs
+    # IMPORTANT: We use the noise x_0 that the model was trained on!
+    # No scaler on x_0!
+    x_0 = x_0_raw.cuda() 
+    
+    # 2. Run deterministic Euler with very few steps (e.g., 5 or 10)
+    # If paths are straight, 5 steps is plenty!
+    num_steps = 5 
+    dt = 1.0 / num_steps
+    x_t = x_0.clone()
+    
+    for i in range(num_steps):
+        t = i / num_steps
+        t_batch = torch.full((x_0.shape[0],), t, device=x_0.device)
+        
+        # Get velocity (No CFG for this diagnostic)
+        v_t = model(x=x_t, t=t_batch, y=y.cuda(), gap=gap.cuda(), energy=energy.cuda(), mask=mask.cuda())
+        
+        x_t = x_t + v_t * dt
+        x_t = x_t * mask.cuda().unsqueeze(-1) # Keep padding clean
+
+    # 3. Convert back to raw physics units
+    x_gen_raw = scaler.inverse_transform(x_t, mask=mask.cuda())
+    
+    # 4. Metric: MSE between Generated x_1 and Ground Truth x_1
+    reflow_error = F.mse_loss(x_gen_raw, x_1_raw.cuda())
+    return reflow_error, x_gen_raw
+
 def test(gpu, opt, output_dir, noises_init):
     debug = False
     set_seed(opt)
@@ -142,8 +176,8 @@ def test(gpu, opt, output_dir, noises_init):
             num_classes = opt.num_classes if hasattr(opt, 'num_classes') else 0,
             gap_classes = opt.gap_classes if hasattr(opt, 'gap_classes') else 0,
             out_channels=4, #opt.out_channels,
-            hidden_size=128,
-            depth=13,
+            hidden_size=256,
+            depth=11,
             num_heads=8,
             mlp_ratio=4,
             use_long_skip=True,
@@ -444,7 +478,7 @@ def parse_args():
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=36, help='input batch size')
+    parser.add_argument('--bs', type=int, default=16, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)

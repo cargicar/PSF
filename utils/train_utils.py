@@ -243,59 +243,90 @@ class MyEulerSampler(Sampler):
             mask = model_kwargs["mask"].unsqueeze(-1).to(self.x_t.device)
             self.x_t = self.x_t * mask
 
+@torch.no_grad()
+def sample_with_voxel_snapping(euler_sampler, centers, **kwargs):
+    """
+    Standard Euler sampling with a final snap to the grid.
+    """
+    # 1. Run the standard ODE integration
+    # traj.x_t will be (B, N, 4) in raw coordinates [x, y, z, logE]
+    traj = euler_sampler.sample_loop(**kwargs)
+    pts = traj.x_t 
+    
+    # 2. Extract spatial coordinates
+    spatial = pts[..., :3]
+    energy = pts[..., 3:4]
+    
+    # 3. Forced Snapping
+    # We find the index of the nearest center for every predicted coordinate
+    # (B, N, 3, 1) - (1, 1, 1, 30) -> find index of min distance
+    dists = torch.abs(spatial.unsqueeze(-1) - centers.view(1, 1, 1, -1))
+    nearest_idx = torch.argmin(dists, dim=-1) # (B, N, 3)
+    
+    # Map indices back to actual center values
+    # snapped_spatial will now be exactly 0.0, 1.0, 2.0...
+    snapped_spatial = centers[nearest_idx]
+    
+    # 4. Recombine with the original (un-snapped) Energy
+    pts_snapped = torch.cat([snapped_spatial, energy], dim=-1)
+    
+    # 5. Handle Padding/Mask
+    if 'mask' in kwargs:
+        pts_snapped = pts_snapped * kwargs['mask'].unsqueeze(-1)
+        
+    return pts_snapped
+
 class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
-    def __init__(self, loss_type: str = "mse", energy_weight: float = 0.0):
+    def __init__(self, centers, loss_type: str = "mse", energy_weight: float = 1.0, grid_weight=0.1):
         super().__init__(loss_type=loss_type)
         self.energy_weight = energy_weight
+        self.grid_weight = grid_weight
+        self.centers = centers 
+        # 'centers' should be torch.tensor([0.0, 1.0, ..., 29.0])
 
-    def __call__(
-        self,
-        v_t: torch.Tensor,
-        dot_x_t: torch.Tensor,
-        x_t: torch.Tensor,
-        t: torch.Tensor,
-        time_weights: torch.Tensor,
-        mask: torch.Tensor = None,           # Added mask
-        #target_energy: torch.Tensor = None,   # Added for physics constraint
-    ) -> torch.Tensor:
-        """
-        Calculates a masked MSE loss + Energy Conservation constraint.
-        """
+    def __call__(self, v_t, dot_x_t, x_t, t, time_weights, mask=None):
         if self.loss_type != "mse":
             return super().__call__(v_t, dot_x_t, x_t, t, time_weights)
+        if self.centers.device != v_t.device:
+            self.centers = self.centers.to(v_t.device)
     
-        # Compute Element-wise Squared Error
-        # Shape: (Batch, Max_Particles, Features)
+        # 1. Standard Velocity MSE
         sq_diff = (v_t - dot_x_t) ** 2
         if mask is not None:
-            # Apply Mask (B, P) -> (B, P, 1)
-            # This zeroes out the error for padded points
             masked_sq_diff = sq_diff * mask.unsqueeze(-1).float()
-            #  Sum over dimensions (Particles and Features)
-            # per_instance_loss shape: (Batch,)
-            # We divide by the number of active points in each instance for stability
             points_per_instance = mask.sum(dim=1).clamp(min=1)
             per_instance_loss = masked_sq_diff.sum(dim=(1, 2)) / (points_per_instance * v_t.shape[-1])
         else:
-            # Fallback to standard mean if no mask provided
             per_instance_loss = torch.mean(sq_diff, dim=list(range(1, v_t.dim())))
 
-        # Standard RF weighting
         loss = torch.mean(time_weights * per_instance_loss)
 
-        #  Physics Constraint: Energy Conservation
-        # Constrain the sum of velocities in the energy dimension (index 3)
-
         if mask is not None:
-            # Velocity toward the target sum: sum(v_t_energy) should match sum(dot_x_t_energy)
+            # 2. Physics Constraint: Energy Conservation
             pred_energy_sum = (v_t[:, :, 3] * mask).sum(dim=1)
             target_energy_sum = (dot_x_t[:, :, 3] * mask).sum(dim=1)
+            loss = loss + (self.energy_weight * F.mse_loss(pred_energy_sum, target_energy_sum))
+
+            # 3. 3D GRID QUANTIZATION
+            # Predict destination x_1 for all coordinates
+            # x_1 = x_t + (1 - t) * v_t
+            pred_x1 = x_t + (1.0 - t.view(-1, 1, 1)) * v_t
             
-            physics_loss = F.mse_loss(pred_energy_sum, target_energy_sum)
-            loss = loss + (self.energy_weight * physics_loss)
+            # Extract spatial coords (B, N, 3)
+            spatial_pred = pred_x1[:, :, :3]
+            
+            # Calculate distance to nearest center for each axis
+            # This broadcasted subtraction finds the distance to all 30 centers simultaneously
+            # (B, N, 3, 1) - (1, 1, 1, 30) -> (B, N, 3, 30)
+            dists = torch.abs(spatial_pred.unsqueeze(-1) - self.centers.view(1, 1, 1, -1))
+            min_dists = torch.min(dists, dim=-1).values # (B, N, 3)
+            
+            # Average over X, Y, Z and mask out padded points
+            quant_loss = (min_dists.mean(dim=-1) * mask).sum() / (mask.sum() + 1e-6)
+            loss = loss + (self.grid_weight * quant_loss)
 
         return loss
-    
+        
 @torch.no_grad()
 def validate_reflow_straightness(model, rectified_flow, val_batch, scaler):
     model.eval()

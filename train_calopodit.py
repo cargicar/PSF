@@ -10,7 +10,7 @@ from torch.distributions import Normal
 from utils.file_utils import *
 from utils.visualize import *
 from utils.train_utils import *
-from datasets.transforms import PointCloudPhysicsScaler #PointCloudStandardScaler
+#from datasets.transforms import PointCloudPhysicsScaler #PointCloudStandardScaler
 from model.calopodit import DiT, DiTConfig
 import torch.distributed as dist
 
@@ -236,7 +236,7 @@ def train(gpu, opt, output_dir):
         dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None)
 
     # Transforms
-    scaler = PointCloudPhysicsScaler(train_dataset.stats)    
+    #scaler = PointCloudPhysicsScaler(train_dataset.stats)    
 
     '''
     create networks
@@ -382,7 +382,8 @@ def train(gpu, opt, output_dir):
     #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
     #Rectified_Flow
     #rf_criterion = RectifiedFlowLossFunction(loss_type = "mse")
-    rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 1.0)
+    centers = torch.linspace(0, 29, 30)
+    rf_criterion = MaskedPhysicalRectifiedFlowLoss(centers, loss_type= "mse", energy_weight= 1.0, grid_weight=0.01) #NOTE I am adding a small grid weight to encourage the model to learn the grid structure, but not too much to overpower the energy loss. Adjust as needed.
     p_drop = opt.dropout
     
     data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
@@ -414,13 +415,12 @@ def train(gpu, opt, output_dir):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         if opt.is_independent_coupling:
                             x, mask, int_energy, y, gap_pid, idx = data
-                            #TODO I am just gonna used Ta to reflow, correct this later
                             gap_pid = gap_pid.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
                             y = y.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
                         else:
                             #NOTE reflow pairs have been saved normalized
                             #idl_dataset.reflow: [x_0.cpu(), pts_norm.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()]
-                            x_0, x_1, mask, int_energy, y, gap_pid, idx = data
+                            x_0, x, mask, int_energy, y, gap_pid, idx = data
                             gap_pid = gap_pid.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
                             #y = y.long()
 
@@ -433,69 +433,46 @@ def train(gpu, opt, output_dir):
                             x = x.transpose(1,2)
                         #noises_batch = noises_init[data['idx']].transpose(1,2)
                     
-                    if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):
-                        if opt.is_independent_coupling:
-                            x = x.cuda(gpu,  non_blocking=True)
-                        else:
-                            x_0 = x_0.cuda(gpu,  non_blocking=True)
-                        x_1 = x_1.cuda(gpu,  non_blocking=True) if not opt.is_independent_coupling else None
+                    if opt.distribution_type == 'multi' or (opt.distribution_type is None and gpu is not None):    
+                        x = x.cuda(gpu,  non_blocking=True)
                         mask = mask.cuda(gpu,  non_blocking=True)
                         y = y.cuda(gpu,  non_blocking=True)
                         gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
                         int_energy = int_energy.cuda(gpu,  non_blocking=True)
-                        scaler = scaler.cuda(gpu)
+                        #scaler = scaler.cuda(gpu)
                         #noises_batch = noises_batch.cuda(gpu)
                     elif opt.distribution_type == 'single':
-                        if opt.is_independent_coupling:
-                            x = x.cuda()
-                        else:
-                            x_0 = x_0.cuda()
-                        x_1 = x_1.cuda() if not opt.is_independent_coupling else None
+                        x = x.cuda()
                         mask = mask.cuda()
                         y = y.cuda()
                         gap_pid = gap_pid.cuda()
                         int_energy = int_energy.cuda()
-                        scaler = scaler.cuda()
+                        #scaler = scaler.cuda()
                         #noises_batch = noises_batch.cuda()
                     
                     optimizer.zero_grad()
                     
                     #Transform
-                    if opt.is_independent_coupling:  #rectified flow dataset saved normalized, so we need to transform here.
-                        x_1 = scaler.transform(x, mask=mask)
-                        rectified_flow.device = x.device      
-                        x_0 = rectified_flow.sample_source_distribution(x_1.shape[0])
-                    else:
-                        rectified_flow.device = x_1.device      
-
-                    if debug:
-                        means = x_1.mean(dim=0)
-                        stds= x_1.std(dim=0)
-                        print(f"Channel Means (Target ~0): {means.cpu().numpy()}")
-                        print(f"Channel Stds  (Target ~1): {stds.cpu().numpy()}")
-                        
-                        # Energy Channel Check (Index 3)
-                        if abs(means[3]) > 0.5 or abs(stds[3] - 1.0) > 0.5:
-                            print("WARNING: Energy channel normalization is OFF. Check dataset stats.")
-                        else:
-                            print("Normalization looks healthy.")
-
+                    #x = scaler.transform(x, mask=mask)
+                    rectified_flow.device = x.device      
+                    x_0 = rectified_flow.sample_source_distribution(x.shape[0])
+                                        
                     #with autocast(enabled=True):
                     if opt.model_name == "pvcnn2":
                         x_0 = x_0.transpose(1,2)
-                    t = rectified_flow.sample_train_time(x_1.shape[0])
+                    t = rectified_flow.sample_train_time(x.shape[0])
                     t= t.squeeze()
 
                     #CFG
-                    batch_size = x_1.shape[0]
+                    batch_size = x.shape[0]
                     if p_drop > 0:
-                        force_drop_ids = torch.bernoulli(torch.full((batch_size,), p_drop, device=x_1.device)).bool()
+                        force_drop_ids = torch.bernoulli(torch.full((batch_size,), p_drop, device=x.device)).bool()
                     else:
                         force_drop_ids = None
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
                     loss = rectified_flow.get_loss(
                                 x_0=x_0,
-                                x_1=x_1,
+                                x_1=x,
                                 y= y,
                                 gap= gap_pid,
                                 energy=int_energy,
@@ -660,8 +637,8 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')
-    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/')# Training two class
+    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/')# Training two class
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/') #Finetuning
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/reflow/combined_batches_reflow_calopodit_Normalized_Feb_10_500_steps.pth') #Reflow
     parser.add_argument('--category', default='all', help='category of dataset')
@@ -736,8 +713,8 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', type=int, default=20, help='unit: epoch')
-    parser.add_argument('--diagIter', type=int, default=20, help='unit: epoch')
+    parser.add_argument('--saveIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--diagIter', type=int, default=8, help='unit: epoch')
     parser.add_argument('--vizIter', type=int, default=8000, help='unit: epoch')
     parser.add_argument('--print_freq', type=int, default=32, help='unit: iter')
 

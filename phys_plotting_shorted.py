@@ -32,6 +32,8 @@ from metrics.physics.plotting_utils import (
     plot_ratios
 )
 
+from join_samples_pth import combine_pth_files
+
 def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = None, material: str = None, **kwargs):
     """Plots the features of multiple constituent or shower sets.
 
@@ -483,7 +485,6 @@ def read_generated(file_path,
                 else:
                     # Fallback or specific user case logic
                     xg, yg, zg, eg = gen_tensor_i.T
-                
                 # --- FILTER LOGIC STARTS HERE ---
                 # Create a boolean mask for points above the threshold
                 valid_mask = eg > energy_threshold
@@ -518,6 +519,7 @@ def read_generated(file_path,
             data_dict["z"].append(x)
             data_dict["y"].append(y)
             data_dict["energy"].append(energy)
+
         print(f"Total Material mistmatch: {n}")
 
     if "pth" in file_path[1]:
@@ -623,19 +625,28 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
     fig.savefig(f"{title}", dpi=300)
 
 if __name__ == "__main__":
-    material = "G4_W"
+    material = "G4_Ta"
     date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    target_directory = "/pscratch/sd/c/ccardona/datasets/pth/" 
+    pattern = "_calopodit_samples_Reflow_unNormalized_Feb_11_2_steps_rank_*.pth"
+    output_file = f"{target_directory}/combined_batches_calopodit_UnNormalized_Feb_20_500_steps.pth"
+    
+    combine_pth_files(target_directory, output_file, pattern= pattern)
+
     import argparse
     parser = argparse.ArgumentParser(description="Plot generated showers vs ground truth")
     #parser.add_argument("--file_path", type=str, required=True, help="Path to the HDF5 file containing generated showers")
     if material == "G4_W":
-        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/w_sim/photon-shower-2_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
+        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/w_sim/photon-shower-0_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
     if material == "G4_Ta":
-        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/ta_sim/photon-shower-2_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
+        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/ta_sim/photon-shower-0_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
+    if material == "G4_Pb":
+        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/pb_train/photon-shower-10_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
+
         #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_calopodit_gen_Jan_17.pth') # For the case when we can to read original and generated from the same pth file
     parser.add_argument('--title', default=f'phys_metrics_calopodit_{date_str}_{material}')
     #parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/logs/example_backbone/runs/2026-02-02_pretrained_from_paper/gen_samples/showers.parquet')
-    parser.add_argument('--genroot', default='/pscratch/sd/c/ccardona/datasets/pth/combined_batches_Reflow_calopodit_UnNormalized_Feb_11_2_steps.pth')
+    parser.add_argument('--genroot', default=output_file)
     #parser.add_argument('--genroot', default='/global/homes/c/ccardona/PSF/output/test_flow_g4/2026-01-06_clopodit_idl_mask/syn/combined_photon_samples.pth')
     parser.add_argument("--num_showers", type=int, default=-1, help="Number of showers to process (-1 for all)")
     args = parser.parse_args()

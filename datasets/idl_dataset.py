@@ -120,8 +120,6 @@ class LazyIDLDataset(Dataset):
             print(f"Indexing {len(file_paths)} H5 files and computing statistics...")
             #FIXME I am hardcoding ignoring Pb_here, NOT NEEED!
             for file_path in file_paths:
-                if "Pb_Simulation" in str(file_path): continue 
-                
                 try:
                     with h5py.File(file_path, "r") as f:
                         for key in f.keys():

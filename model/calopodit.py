@@ -9,6 +9,7 @@
 # MAE: https://github.com/facebookresearch/mae/blob/main/models_mae.py
 # --------------------------------------------------------
 
+from logging import config
 import torch
 import torch.nn as nn
 import numpy as np
@@ -25,34 +26,29 @@ from model.PTransformer import TransformerBlock
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
 
-#replacing timm Attention for nn.MultuheadAttention
-# class NativeAttention(nn.Module):
-#     def __init__(self, dim, num_heads, qkv_bias=True, attn_drop=0., proj_drop=0.):
-#         super().__init__()
-#         self.mha = nn.MultiheadAttention(
-#             embed_dim=dim,
-#             num_heads=num_heads,
-#             dropout=attn_drop,
-#             bias=qkv_bias,
-#             batch_first=True  # Critical: Matches (Batch, Points, Dim) layout
-#         )
-#         self.proj_drop = nn.Dropout(proj_drop)
+class VoxelGridEmbedder(nn.Module):
+    def __init__(self, hidden_size, grid_dims=(30, 30, 30)):
+        super().__init__()
+        # Each axis gets its own learnable embedding space
+        self.x_emb = nn.Embedding(grid_dims[0], hidden_size // 3)
+        self.y_emb = nn.Embedding(grid_dims[1], hidden_size // 3)
+        self.z_emb = nn.Embedding(grid_dims[2], hidden_size // 3)
+        # Final projection to ensure it matches hidden_size exactly
+        self.proj = nn.Linear((hidden_size // 3) * 3, hidden_size)
 
-#     def forward(self, x, key_padding_mask = None):
-#         """
-#         x: (Batch, Points, Dim)
-#         mask: (Batch, Points) Boolean tensor. True=Keep, False=Pad/Ignore.
-#         """
-#         # Pass x for query, key, value
-#         out, _ = self.mha(
-#             query=x, 
-#             key=x, 
-#             value=x, 
-#             key_padding_mask=key_padding_mask, 
-#             need_weights=False 
-#         )
-#         return self.proj_drop(out)
+    def forward(self, coords):
+        # coords: (B, N, 3) raw voxel centers (0.0, 1.0, ..., 29.0)
+        # Use round() before casting to long to handle 28.999 or 29.001
+        idx_x = torch.clamp(torch.round(coords[..., 0]).long(), 0, 29)
+        idx_y = torch.clamp(torch.round(coords[..., 1]).long(), 0, 29)
+        idx_z = torch.clamp(torch.round(coords[..., 2]).long(), 0, 29)
 
+        feat_x = self.x_emb(idx_x)
+        feat_y = self.y_emb(idx_y)
+        feat_z = self.z_emb(idx_z)
+
+        return self.proj(torch.cat([feat_x, feat_y, feat_z], dim=-1))    
+    
 # Replaces nn.MultiheadAttention with optimized F.scaled_dot_product_attention
 class NativeAttention(nn.Module):
     def __init__(self, dim, num_heads, qkv_bias=True, attn_drop=0., proj_drop=0.):
@@ -557,38 +553,19 @@ class DiT(nn.Module):
         self.patch_size = config.patch_size
         self.num_heads = config.num_heads
 
-        # self.x_embedder = PatchEmbed(
-        #     config.input_size,
-        #     config.patch_size,
-        #     config.in_channels,
-        #     config.hidden_size,
-        #     bias=True,
-        # )
+        # This learns to scale the raw (x, y, z, logE) into a range the model likes
+        self.input_norm = nn.LayerNorm(config.in_features, elementwise_affine=True)
+
+        self.grid_bias = VoxelGridEmbedder(config.hidden_size, grid_dims=(30, 30, 30))
         #FIXME add flag to  pick between PT, EConv, PFS 
-        #NOTE point transformer replaced PatchEmbed
-        # AKA Tokenizer
-        # Single Transformer Block
-        # self.x_embedder = TransformerBlock(
-        #     config.in_features,
-        #     config.hidden_size,#config.transformer_features,
-        #     config.hidden_size,
-        #     config.k,
-        #     )
+ 
         # Two blocks for improved complex geometric extraction
         self.x_embedder = PointEmbedder(config)
         self.embed_norm = nn.LayerNorm(config.hidden_size, elementwise_affine=False, eps=1e-6) #to stabilize variance before DiTBlocks
 
-        #NOTE  EdgeConvBlock replaced point transformer
-        # self.x_embedder = EdgeConvBlock(
-        #     config.in_features,
-        #     config.hidden_size,#config.transformer_features,
-        #     config.hidden_size,
-        #     config.k,
-        #     )
-
         #self.pos_embedder = SineSpatialEmbedder(config.hidden_size)
         #TODO try later as a replacement for SineSpatialEmbbeder
-        self.pos_embedder = FourierSpatialEmbedder(config.hidden_size)
+        self.pos_embedder = FourierSpatialEmbedder(config.hidden_size, base_scale=0.04) #NOTE base_scale =1/grid_scale
         
         self.t_embedder = TimestepEmbedder(config.hidden_size)
 
@@ -732,16 +709,28 @@ class DiT(nn.Module):
         x: (N, Points, C) tensor of spatial point inputs 
         t: (N,) tensor of diffusion timesteps
         """
-        # 1. Prepare Mask for Attention (True = Ignore/Pad)
+        #  Prepare Mask for Attention (True = Ignore/Pad)
         key_padding_mask = ~mask.bool() if mask is not None else None
 
-        # 2. Spatial Embeddings
-        coords = x[..., :3] 
-        # FIX: Removed [0] index
-        x_features = self.x_embedder(x, mask=mask) 
+        coords_raw = x[..., :3]
+
+        # 1. Generate Grid Bias from raw integer centers
+        grid_anchor = self.grid_bias(coords_raw)
+
+        # 2. Generate Fourier Positional Encoding
+        pos_emb = self.pos_embedder(coords_raw)
+
+        # 3. Internal Normalization of the 4-dim input
+        # This keeps the backbone stable while keeping coordinates raw for the anchors
+        x_norm = self.input_norm(x)
+
+        # 4. Tokenize (Point Transformer)
+        x_features = self.x_embedder(x_norm, mask=mask)
+
+        # 5. Combine everything
+        # x_features (Local geometry) + pos_emb (Smooth frequency) + grid_anchor (Rigid grid)
+        x = x_features + pos_emb + grid_anchor
         
-        pos_emb = self.pos_embedder(coords)
-        x = x_features + pos_emb 
         x = self.embed_norm(x)
 
         # --- CONDITIONING LOGIC ---

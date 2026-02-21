@@ -56,7 +56,7 @@ def plot_loss_from_log(file_path):
 
     # --- SMOOTHING LOGIC ---
     # Define how many points to average over (adjust this to make it smoother/sharper)
-    window_size = 40
+    window_size = 10
     smoothed_losses = calculate_moving_average(losses, window_size)
     
     # Adjust iterations to match the length of smoothed data 
@@ -70,7 +70,7 @@ def plot_loss_from_log(file_path):
     plt.plot(iterations, losses, linewidth=1, alpha=0.3, color='gray', label='Raw Training Loss')
     
     # 2. Plot the soothing average (solid line)
-    plt.plot(smoothed_iterations, smoothed_losses, linewidth=2, color='tab:blue', label=f'Moving Average (n={window_size})')
+    #plt.plot(smoothed_iterations, smoothed_losses, linewidth=2, color='tab:blue', label=f'Moving Average (n={window_size})')
     
     plt.xlabel('Global Iterations')
     plt.ylabel('Loss')
@@ -90,7 +90,7 @@ def plot_loss_from_log(file_path):
         plt.show() # Fallback to showing plot if save fails
 
 if __name__ == "__main__":
-    log_file = "/global/homes/c/ccardona/PSF2/PSF/output/train_calopodit/2026-02-12-09-38-57/output.log"
+    log_file = "/global/homes/c/ccardona/PSF2/PSF/output/train_calopodit/2026-02-20-13-46-53/output.log"
     
     if len(sys.argv) > 1:
         log_file = sys.argv[1]

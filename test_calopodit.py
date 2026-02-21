@@ -9,7 +9,7 @@ from torch.distributions import Normal
 from utils.file_utils import *
 from utils.visualize import *
 from utils.train_utils import *
-from datasets.transforms import PointCloudPhysicsScaler # PointCloudStandardScaler
+#from datasets.transforms import PointCloudPhysicsScaler # PointCloudStandardScaler
 from model.calopodit import DiT, DiTConfig
 import torch.distributed as dist
 
@@ -119,7 +119,7 @@ def test(gpu, opt, output_dir, noises_init):
     train_dataset, _ = get_dataset(opt.dataroot, opt.npoints, opt.category, name = opt.dataname)
     dataloader, _, train_sampler, _ = get_dataloader(opt, train_dataset, test_dataset = None, collate_fn=partial(pad_collate_fn, max_particles= train_dataset.max_particles))
     # Transforms
-    scaler = PointCloudPhysicsScaler(train_dataset.stats)    
+    #scaler = PointCloudPhysicsScaler(train_dataset.stats)    
 
 
     '''
@@ -212,7 +212,8 @@ def test(gpu, opt, output_dir, noises_init):
     #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
     #Rectified_Flow
     #rf_criterion = RectifiedFlowLossFunction(loss_type = "mse")
-    rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 0.1)
+    centers = torch.linspace(0, 29, 30)
+    rf_criterion = MaskedPhysicalRectifiedFlowLoss(centers, loss_type= "mse", energy_weight= 1.0, grid_weight=0.01) #NOTE I am adding a small grid weight to encourage the model to learn the grid structure, but not too much to overpower the energy loss. Adjust as needed.
     #rf_criterion = "mse"
 
     data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
@@ -237,8 +238,8 @@ def test(gpu, opt, output_dir, noises_init):
     # CFG Scale (Usually 2.0 to 7.0 for diffusion/flow)
     # 1.0 = No guidance (standard), 4.0 = Strong guidanc
     #TODO create args for cfg scale
-    #cfg_scale = 2.0
-    cfg_scale = 1.0
+    cfg_scale = 2.0
+    #cfg_scale = 1.0
     masks =[]
     xs = []
     recons = []
@@ -269,7 +270,7 @@ def test(gpu, opt, output_dir, noises_init):
                 gap_pid = gap_pid.cuda(gpu,  non_blocking=True)
                 int_energy = int_energy.cuda(gpu,  non_blocking=True)
                 int_energy = int_energy.cuda(gpu,  non_blocking=True)
-                scaler = scaler.cuda(gpu)
+                #scaler = scaler.cuda(gpu)
                 #noises_batch = noises_batch.cuda(gpu)
             elif opt.distribution_type == 'single':
                 x = x.cuda()
@@ -278,16 +279,16 @@ def test(gpu, opt, output_dir, noises_init):
                 gap_pid = gap_pid.cuda()
                 int_energy = int_energy.cuda()
                 int_energy = int_energy.cuda()
-                scaler = scaler.cuda()
+                #scaler = scaler.cuda()
                 #noises_batch = noises_batch.cuda()
             
             #Transform
-            x_1 = scaler.transform(x, mask=mask)
+            #x_1 = scaler.transform(x, mask=mask)
 
             rectified_flow.device = x.device      
-            x_0 = rectified_flow.sample_source_distribution(x_1.shape[0])
+            x_0 = rectified_flow.sample_source_distribution(x.shape[0])
 
-            t = rectified_flow.sample_train_time(x_1.shape[0])
+            t = rectified_flow.sample_train_time(x.shape[0])
             t= t.squeeze()
             #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
 
@@ -318,14 +319,14 @@ def test(gpu, opt, output_dir, noises_init):
                     num_steps=num_steps,
                     cfg_scale=cfg_scale,
                     )
-                pts_norm= traj1.x_t
+                pts= traj1.x_t
                 trajectory = traj1.trajectories
                 print(f"Rank {gpu}: Generating batch {i}")
                 # Un-Normalize back to real physics units
-                pts = scaler.inverse_transform(pts_norm, mask=mask)
+                #pts = scaler.inverse_transform(pts_norm, mask=mask)
                 #if gpu == 0:
                 save_path = f'{opt.pthsave}_calopodit_samples_Reflow_normalized_Feb_11_1_steps_rank_{gpu}_batch_{i}.pth'
-                save_path2 = f'{opt.pthsave}_calopodit_samples_Reflow_unNormalized_Feb_11_2_steps_rank_{gpu}_batch_{i}.pth'
+                save_path2 = f'{opt.pthsave}_calopodit_unNormalized_Feb_20_steps_500_rank_{gpu}_batch_{i}.pth'
                 
                 #NOTE saving un-normalized for reflow
                 #torch.save([x_0.cpu(), pts_norm.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path)  

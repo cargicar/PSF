@@ -30,7 +30,7 @@ class PointCloudPhysicsScaler(nn.Module):
     - X, Y, Log(Energy): Z-score (Mean/Std)
     - Z (Layer): Min-Max to [-1, 1]
     """
-    def __init__(self, stats_dict, z_min=0.0, z_max=30.0, device="cpu"):
+    def __init__(self, stats_dict, z_min=0.0, z_max=29.0, device="cpu"):
         super().__init__()
         
         # 1. Standard Stats (Mean/Std)

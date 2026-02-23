@@ -238,8 +238,7 @@ def test(gpu, opt, output_dir, noises_init):
     # CFG Scale (Usually 2.0 to 7.0 for diffusion/flow)
     # 1.0 = No guidance (standard), 4.0 = Strong guidanc
     #TODO create args for cfg scale
-    cfg_scale = 2.0
-    #cfg_scale = 1.0
+    cfg_scale = 1.0
     masks =[]
     xs = []
     recons = []
@@ -309,30 +308,58 @@ def test(gpu, opt, output_dir, noises_init):
                 
                 # Sample method
                 #FIXME we should be using a validatioon small dataset instead
-                traj1 = euler_sampler.sample_loop(
+                # traj1 = euler_sampler.sample_loop(
+                #     x_0=x_0,
+                #     y=y,
+                #     gap= gap_pid,
+                #     energy=int_energy,
+                #     mask=mask,
+                #     num_samples=num_samples,
+                #     num_steps=num_steps,
+                #     cfg_scale=cfg_scale,
+                #     )
+                # pts_norm= traj1.x_t
+                # trajectory = traj1.trajectories
+                # Replace traj1 = euler_sampler.sample_loop(...) with this:
+                
+                centers_tensor = torch.linspace(0, 29, 30, device=x.device)
+                
+                # Run the full pipeline: Sample -> Clamp -> Snap -> Merge
+                pts_norm, new_mask = sample_with_voxel_snapping(
+                    euler_sampler=euler_sampler,
+                    centers=centers_tensor,
                     x_0=x_0,
                     y=y,
-                    gap= gap_pid,
+                    gap=gap_pid,
                     energy=int_energy,
                     mask=mask,
                     num_samples=num_samples,
                     num_steps=num_steps,
                     cfg_scale=cfg_scale,
-                    )
-                pts= traj1.x_t
-                trajectory = traj1.trajectories
+                )
+
                 print(f"Rank {gpu}: Generating batch {i}")
-                # Un-Normalize back to real physics units
-                #pts = scaler.inverse_transform(pts_norm, mask=mask)
-                #if gpu == 0:
-                save_path = f'{opt.pthsave}_calopodit_samples_Reflow_normalized_Feb_11_1_steps_rank_{gpu}_batch_{i}.pth'
-                save_path2 = f'{opt.pthsave}_calopodit_unNormalized_Feb_20_steps_500_rank_{gpu}_batch_{i}.pth'
                 
-                #NOTE saving un-normalized for reflow
-                #torch.save([x_0.cpu(), pts_norm.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path)  
-                torch.save([x.cpu(), pts.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path2)  
-                print(f"Batch data saved to {save_path}")
+                # Convert back to raw physical energy
+                coords = pts_norm[..., :3]
+                energy_norm = pts_norm[..., 3:4]
+                energy_raw = torch.exp(energy_norm) - 1e-6
                 
+                # Prevent any negative floating point values
+                energy_raw = torch.clamp(energy_raw, min=0.0) 
+                pts = torch.cat([coords, energy_raw], dim=-1) 
+
+                xcoords = x[..., :3]
+                xenergy_norm = x[..., 3:4]
+                xenergy_raw = torch.exp(xenergy_norm) - 1e-6
+                xenergy_raw = torch.clamp(xenergy_raw, min=0.0)
+                x = torch.cat([xcoords, xenergy_raw], dim=-1)
+
+                save_path2 = f'{opt.pthsave}_calopodit_unNormalized_Feb_23_steps_{num_steps}_rank_{gpu}_batch_{i}.pth'
+                
+                # CRITICAL: Save new_mask, not mask!
+                torch.save([x.cpu(), pts.cpu(), new_mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path2)  
+                print(f"Batch data saved to {save_path2}")           
                 # Plotting (only needs to be done on master)
                 # Note: plot_4d_reconstruction might need CPU tensors
                 plot = False

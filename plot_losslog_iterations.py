@@ -1,7 +1,25 @@
 import re
+import os
 import matplotlib.pyplot as plt
 import sys
 import numpy as np  # Added for efficient average calculation
+
+import os
+
+def get_latest_folder(path="."):
+    # Get all entries in the directory
+    entries = os.listdir(path)
+    
+    # Filter to keep only directories
+    folders = [f for f in entries if os.path.isdir(os.path.join(path, f))]
+    
+    if not folders:
+        return None
+
+    # Sort alphabetically (works perfectly for ISO-style dates)
+    folders.sort()
+    
+    return folders[-1]
 
 def calculate_moving_average(data, window_size):
     """
@@ -23,7 +41,7 @@ def calculate_moving_average(data, window_size):
     # mode='valid' ensures we only compute averages where we have a full window
     return np.convolve(data, kernel, mode='valid')
 
-def plot_loss_from_log(file_path):
+def plot_loss_from_log(file_path, start_ite = 20):
     iterations = []
     losses = []
     
@@ -56,13 +74,14 @@ def plot_loss_from_log(file_path):
 
     # --- SMOOTHING LOGIC ---
     # Define how many points to average over (adjust this to make it smoother/sharper)
-    window_size = 10
-    smoothed_losses = calculate_moving_average(losses, window_size)
+    window_size = 50
     
     # Adjust iterations to match the length of smoothed data 
     # (Convolution with mode='valid' shortens the array by window_size - 1)
+    iterations= iterations[start_ite:]  # Start from a later iteration to avoid initial noise
+    losses = losses[start_ite:]
     smoothed_iterations = iterations[window_size - 1:]
-
+    smoothed_losses = calculate_moving_average(losses, window_size)
     # --- PLOTTING ---
     plt.figure(figsize=(10, 5))
     
@@ -70,7 +89,7 @@ def plot_loss_from_log(file_path):
     plt.plot(iterations, losses, linewidth=1, alpha=0.3, color='gray', label='Raw Training Loss')
     
     # 2. Plot the soothing average (solid line)
-    #plt.plot(smoothed_iterations, smoothed_losses, linewidth=2, color='tab:blue', label=f'Moving Average (n={window_size})')
+    plt.plot(smoothed_iterations, smoothed_losses, linewidth=2, color='tab:blue', label=f'Moving Average (n={window_size})')
     
     plt.xlabel('Global Iterations')
     plt.ylabel('Loss')
@@ -90,9 +109,12 @@ def plot_loss_from_log(file_path):
         plt.show() # Fallback to showing plot if save fails
 
 if __name__ == "__main__":
-    log_file = "/global/homes/c/ccardona/PSF2/PSF/output/train_calopodit/2026-02-20-13-46-53/output.log"
-    
+    log_file = "/global/homes/c/ccardona/PSF2/PSF/output/train_calopodit/"
+    latest = get_latest_folder(log_file)
+    print(f"The latest subfolder is: {latest}")
+    full_path = os.path.join(log_file, latest + "/output.log")
+
     if len(sys.argv) > 1:
         log_file = sys.argv[1]
         
-    plot_loss_from_log(log_file)
+    plot_loss_from_log(full_path, start_ite=0)

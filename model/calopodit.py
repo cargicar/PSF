@@ -553,9 +553,7 @@ class DiT(nn.Module):
         self.patch_size = config.patch_size
         self.num_heads = config.num_heads
 
-        # This learns to scale the raw (x, y, z, logE) into a range the model likes
-        self.input_norm = nn.LayerNorm(config.in_features, elementwise_affine=True)
-
+        
         self.grid_bias = VoxelGridEmbedder(config.hidden_size, grid_dims=(30, 30, 30))
         #FIXME add flag to  pick between PT, EConv, PFS 
  
@@ -646,6 +644,16 @@ class DiT(nn.Module):
         if hasattr(self.pos_embedder, "log_scale"):
             nn.init.constant_(self.pos_embedder.log_scale, 0.0)
 
+        # Initialize VoxelGridEmbedder to have a smaller variance
+        if hasattr(self, "grid_bias"):
+            nn.init.normal_(self.grid_bias.x_emb.weight, std=0.02)
+            nn.init.normal_(self.grid_bias.y_emb.weight, std=0.02)
+            nn.init.normal_(self.grid_bias.z_emb.weight, std=0.02)
+            
+            # Initialize its final projection layer normally
+            nn.init.xavier_uniform_(self.grid_bias.proj.weight)
+            nn.init.constant_(self.grid_bias.proj.bias, 0)
+
         # 4. Zero-init Strategy for AdaLN (Critical for stability)
         # DiT relies on the blocks starting as Identity transforms.
         # We zero-initialize the FINAL linear layer in every modulation sequence.
@@ -667,6 +675,7 @@ class DiT(nn.Module):
         # Zero-init the head to output a mean-velocity of zero initially
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
+
     def save_pretrained(self, save_directory: str, filename: str = "dit"):
         os.makedirs(save_directory, exist_ok=True)
         config_path = os.path.join(save_directory, f"{filename}_config.json")
@@ -713,19 +722,19 @@ class DiT(nn.Module):
         key_padding_mask = ~mask.bool() if mask is not None else None
 
         coords_raw = x[..., :3]
+        logE_raw = x[..., 3:4] 
 
         # 1. Generate Grid Bias from raw integer centers
         grid_anchor = self.grid_bias(coords_raw)
-
+        coords_scaled = coords_raw/ 29.0
+        logE_scaled = logE_raw / 10.0
+        x_scaled = torch.cat([coords_scaled, logE_scaled], dim=-1)
         # 2. Generate Fourier Positional Encoding
-        pos_emb = self.pos_embedder(coords_raw)
-
-        # 3. Internal Normalization of the 4-dim input
-        # This keeps the backbone stable while keeping coordinates raw for the anchors
-        x_norm = self.input_norm(x)
+        #pos_emb = self.pos_embedder(coords_raw)
+        pos_emb = self.pos_embedder(coords_scaled)
 
         # 4. Tokenize (Point Transformer)
-        x_features = self.x_embedder(x_norm, mask=mask)
+        x_features = self.x_embedder(x_scaled, mask=mask)
 
         # 5. Combine everything
         # x_features (Local geometry) + pos_emb (Smooth frequency) + grid_anchor (Rigid grid)

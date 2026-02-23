@@ -204,94 +204,133 @@ class MyEulerSampler(Sampler):
         super().__init__(**kwargs)
 
     def step(self, **model_kwargs):
-        # Extract the current time, next time point, and current state
-        t, t_next, x_t = self.t, self.t_next, self.x_t
-        
-        # 1. Extract CFG Scale (default to 1.0 if not provided)
-        cfg_scale = model_kwargs.get("cfg_scale", 1.0)
-        
-        # 2. Branching Logic
-        if cfg_scale > 1.0:
-            # --- CFG PATH ---
-            # We bypass rectified_flow.get_velocity to call the model directly.
-            # This allows us to leverage the 'forward_with_cfg' method you added to DiT.
+            t, t_next, x_t = self.t, self.t_next, self.x_t
+            cfg_scale = model_kwargs.get("cfg_scale", 1.0)
             
-            # Critical: 't' in the loop is a float, but the model expects a Tensor (N,)
-            batch_size = x_t.shape[0]
-            t_tensor = torch.full((batch_size,), t, device=x_t.device, dtype=torch.float32)
-            
-            # Access the underlying DiT model (velocity_field) directly
-            if hasattr(self.rectified_flow.velocity_field, 'module'):
-                self.rectified_flow.velocity_field = self.rectified_flow.velocity_field.module
-            v_t = self.rectified_flow.velocity_field.forward_with_cfg(
-                x=x_t,
-                t=t_tensor,
-                #cfg_scale=cfg_scale,
-                **model_kwargs # Unpacks y, gap, energy, mask automatically
-            )
-        else:
-            # --- STANDARD PATH ---
-            # Use the standard wrapper for normal inference
-            v_t = self.rectified_flow.get_velocity(x_t=x_t, t=t, **model_kwargs)
-            
-        # 3. Update the state using the Euler formula
-        self.x_t = self.x_t + (t_next - t) * v_t     
+            if cfg_scale > 1.0:
+                batch_size = x_t.shape[0]
+                t_tensor = torch.full((batch_size,), t, device=x_t.device, dtype=torch.float32)
+                
+                if hasattr(self.rectified_flow.velocity_field, 'module'):
+                    self.rectified_flow.velocity_field = self.rectified_flow.velocity_field.module
+                v_t = self.rectified_flow.velocity_field.forward_with_cfg(
+                    x=x_t, t=t_tensor, **model_kwargs 
+                )
+            else:
+                v_t = self.rectified_flow.get_velocity(x_t=x_t, t=t, **model_kwargs)
+                
+            # 1. Update the state using the Euler formula
+            self.x_t = self.x_t + (t_next - t) * v_t     
 
-        # 4. Masking (Zero out padded points)
-        if "mask" in model_kwargs and model_kwargs["mask"] is not None:
-            # Ensure mask is broadcastable (B, N, 1)
-            mask = model_kwargs["mask"].unsqueeze(-1).to(self.x_t.device)
-            self.x_t = self.x_t * mask
+            # REMOVED THE SPATIAL CLAMPING FROM HERE!
+            # Just update the mask
+            if "mask" in model_kwargs and model_kwargs["mask"] is not None:
+                mask = model_kwargs["mask"].unsqueeze(-1).to(self.x_t.device)
+                self.x_t = self.x_t * mask
+
+@torch.no_grad()
+def apply_voxel_collision_filter(pts_snapped, mask, grid_dims=(30, 30, 30)):
+    """Merges overlapping points in the same voxel by summing linear energies."""
+    B, N, _ = pts_snapped.shape
+    Dx, Dy, Dz = grid_dims
+    device = pts_snapped.device
+
+    # Convert Log-Energy to Linear Energy for addition
+    log_energy = pts_snapped[..., 3]
+    linear_energy = torch.exp(log_energy) - 1e-6
+    linear_energy = torch.clamp(linear_energy, min=0.0) 
+
+    if mask is not None:
+        linear_energy = linear_energy * mask.float()
+
+    # Map 3D -> 1D index
+    x = pts_snapped[..., 0].long().clamp(0, Dx - 1)
+    y = pts_snapped[..., 1].long().clamp(0, Dy - 1)
+    z = pts_snapped[..., 2].long().clamp(0, Dz - 1)
+    flat_idx = x + (y * Dx) + (z * Dx * Dy)
+
+    filtered_pts = torch.zeros_like(pts_snapped)
+    new_mask = torch.zeros_like(mask) if mask is not None else torch.zeros(B, N, device=device)
+
+    for b in range(B):
+        grid_energies = torch.bincount(flat_idx[b], weights=linear_energy[b], minlength=Dx*Dy*Dz)
+        
+        active_mask = grid_energies > 0
+        active_flat_idx = torch.nonzero(active_mask).squeeze(-1)
+        active_energies = grid_energies[active_mask]
+        
+        # Reconstruct 3D Coordinates
+        active_z = active_flat_idx // (Dx * Dy)
+        rem = active_flat_idx % (Dx * Dy)
+        active_y = rem // Dx
+        active_x = rem % Dx
+        
+        # Back to Log-Energy
+        active_logE = torch.log(active_energies + 1e-6)
+        
+        num_keep = min(len(active_flat_idx), N) 
+        filtered_pts[b, :num_keep, 0] = active_x[:num_keep].float()
+        filtered_pts[b, :num_keep, 1] = active_y[:num_keep].float()
+        filtered_pts[b, :num_keep, 2] = active_z[:num_keep].float()
+        filtered_pts[b, :num_keep, 3] = active_logE[:num_keep]
+        
+        if mask is not None:
+            new_mask[b, :num_keep] = 1
+
+    return filtered_pts, new_mask
 
 @torch.no_grad()
 def sample_with_voxel_snapping(euler_sampler, centers, **kwargs):
-    """
-    Standard Euler sampling with a final snap to the grid.
-    """
-    # 1. Run the standard ODE integration
-    # traj.x_t will be (B, N, 4) in raw coordinates [x, y, z, logE]
+    # 1. Run ODE integration
     traj = euler_sampler.sample_loop(**kwargs)
     pts = traj.x_t 
     
-    # 2. Extract spatial coordinates
-    spatial = pts[..., :3]
+    spatial = torch.clamp(pts[..., :3], 0.0, 29.0)
     energy = pts[..., 3:4]
     
-    # 3. Forced Snapping
-    # We find the index of the nearest center for every predicted coordinate
-    # (B, N, 3, 1) - (1, 1, 1, 30) -> find index of min distance
+    # 2. Snapping
     dists = torch.abs(spatial.unsqueeze(-1) - centers.view(1, 1, 1, -1))
-    nearest_idx = torch.argmin(dists, dim=-1) # (B, N, 3)
-    
-    # Map indices back to actual center values
-    # snapped_spatial will now be exactly 0.0, 1.0, 2.0...
+    nearest_idx = torch.argmin(dists, dim=-1)
     snapped_spatial = centers[nearest_idx]
     
-    # 4. Recombine with the original (un-snapped) Energy
     pts_snapped = torch.cat([snapped_spatial, energy], dim=-1)
     
-    # 5. Handle Padding/Mask
-    if 'mask' in kwargs:
-        pts_snapped = pts_snapped * kwargs['mask'].unsqueeze(-1)
+    mask = kwargs.get('mask', None)
+    if mask is not None:
+        pts_snapped = pts_snapped * mask.unsqueeze(-1)
+
+    # 3. Collision Filter
+    filtered_pts, new_mask = apply_voxel_collision_filter(pts_snapped, mask)
         
-    return pts_snapped
+    return filtered_pts, new_mask
 
 class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
-    def __init__(self, centers, loss_type: str = "mse", energy_weight: float = 1.0, grid_weight=0.1):
+    def __init__(self, centers, loss_type="mse", energy_weight=10.0, grid_weight=10.0, e_channel_weight=20.0):
         super().__init__(loss_type=loss_type)
         self.energy_weight = energy_weight
         self.grid_weight = grid_weight
-        self.centers = centers 
-        # 'centers' should be torch.tensor([0.0, 1.0, ..., 29.0])
+        self.e_channel_weight = e_channel_weight # NEW: Boosts energy gradient
+        self.centers = centers
 
     def __call__(self, v_t, dot_x_t, x_t, t, time_weights, mask=None):
         if self.loss_type != "mse":
             return super().__call__(v_t, dot_x_t, x_t, t, time_weights)
         if self.centers.device != v_t.device:
             self.centers = self.centers.to(v_t.device)
+        #FIXME to be able to capture the mask here, I have edited the rectified_flow.get_loss to pass the mask as an argument. This is a bit hacky, but it allows us to keep the loss function logic here while still having access to the mask. We can consider refactoring this later for cleaner design.
+        # to find path python -c "import rectified_flow; print(rectified_flow.__file__)"x
     
-        # 1. Standard Velocity MSE
-        sq_diff = (v_t - dot_x_t) ** 2
+        # 1. SPLIT SQUARED ERROR
+        # Spatial error (X, Y, Z)
+        spatial_sq_diff = (v_t[..., :3] - dot_x_t[..., :3]) ** 2
+        
+        # Energy error (LogE) - Multiplied by the balancing weight
+        energy_sq_diff = ((v_t[..., 3:4] - dot_x_t[..., 3:4]) ** 2) * self.e_channel_weight
+        
+        # Recombine
+        sq_diff = torch.cat([spatial_sq_diff, energy_sq_diff], dim=-1)
+
+        # 2. Standard Masking and Mean
         if mask is not None:
             masked_sq_diff = sq_diff * mask.unsqueeze(-1).float()
             points_per_instance = mask.sum(dim=1).clamp(min=1)
@@ -299,34 +338,33 @@ class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
         else:
             per_instance_loss = torch.mean(sq_diff, dim=list(range(1, v_t.dim())))
 
-        loss = torch.mean(time_weights * per_instance_loss)
-
+        loss_mse = torch.mean(time_weights * per_instance_loss)
+        # 3. Physics & Grid Constraints
         if mask is not None:
-            # 2. Physics Constraint: Energy Conservation
-            pred_energy_sum = (v_t[:, :, 3] * mask).sum(dim=1)
-            target_energy_sum = (dot_x_t[:, :, 3] * mask).sum(dim=1)
-            loss = loss + (self.energy_weight * F.mse_loss(pred_energy_sum, target_energy_sum))
+            
+            # Energy Sum Constraint
+            pred_lin_energy = torch.exp(v_t[..., 3]) * mask.float()
+            target_lin_energy = torch.exp(dot_x_t[..., 3]) * mask.float()
+            
+            #  Sum the actual physical energy deposits
+            pred_sum = pred_lin_energy.sum(dim=1)
+            target_sum = target_lin_energy.sum(dim=1)
+            
+            # Calculate Normalized MSE
+            # Dividing by target_sum + epsilon makes this a 'fractional' error.
+            # This keeps the value small (usually between 0 and 1).
+            rel_diff = (pred_sum - target_sum) / (target_sum + 1e-6)
+            loss_sumE = self.energy_weight * torch.mean(rel_diff ** 2)
 
-            # 3. 3D GRID QUANTIZATION
-            # Predict destination x_1 for all coordinates
-            # x_1 = x_t + (1 - t) * v_t
+            # 3D Grid Quantization Constraint
             pred_x1 = x_t + (1.0 - t.view(-1, 1, 1)) * v_t
-            
-            # Extract spatial coords (B, N, 3)
-            spatial_pred = pred_x1[:, :, :3]
-            
-            # Calculate distance to nearest center for each axis
-            # This broadcasted subtraction finds the distance to all 30 centers simultaneously
-            # (B, N, 3, 1) - (1, 1, 1, 30) -> (B, N, 3, 30)
+            spatial_pred = pred_x1[..., :3]
             dists = torch.abs(spatial_pred.unsqueeze(-1) - self.centers.view(1, 1, 1, -1))
-            min_dists = torch.min(dists, dim=-1).values # (B, N, 3)
+            min_dists = torch.min(dists, dim=-1).values
+            quant_loss = self.grid_weight *(min_dists.mean(dim=-1) * mask).sum() / (mask.sum() + 1e-6)
+        loss = loss_mse + loss_sumE +  quant_loss
+        return loss, loss_mse, loss_sumE, quant_loss
             
-            # Average over X, Y, Z and mask out padded points
-            quant_loss = (min_dists.mean(dim=-1) * mask).sum() / (mask.sum() + 1e-6)
-            loss = loss + (self.grid_weight * quant_loss)
-
-        return loss
-        
 @torch.no_grad()
 def validate_reflow_straightness(model, rectified_flow, val_batch, scaler):
     model.eval()
@@ -425,90 +463,4 @@ def plot_4d_reconstruction(original, reconstructed, savepath=".reconstructed.png
     fig.savefig(f"{savepath}", dpi=300)
     plt.close(fig)
 
-def make_phys_plots(real, gen, material_list=["G4_W"], savepath="./Phys_plots/"):
-    #TODO read the gap_pid and pass it to the plotting function
-    material = material_list[0]
-    gen_dict = {
-        "x": [],
-        "y": [],
-        "z": [],
-        "energy": []
-    }
-    data_dict = {
-        "x": [],
-        "y": [],
-        "z": [],
-        "energy": [],
-    }
-    for i in range(gen.shape[0]):
-        if real[i].shape[0]==4:
-            x, y, z, e = real[i]
-            xg, yg, zg, eg = gen[i]
-        else:
-            x, y, z, e = real[i].T
-            xg, yg, zg, eg = gen[i].T
-
-
-        gen_dict["x"].append(zg)
-        gen_dict["z"].append(xg)
-        gen_dict["y"].append(yg)
-        gen_dict["energy"].append(eg)
-
-        data_dict["x"].append(z)
-        data_dict["z"].append(x)
-        data_dict["y"].append(y)
-        data_dict["energy"].append(e)
-                
-        ak_array_truth = ak.Array(data_dict)
-        ak_array_gen = ak.Array(gen_dict)
-
-    fig = plot_paper_plots(
-            [ak_array_truth, ak_array_gen],
-            labels=["Ground Truth", "Generated"],
-            colors=["lightgrey", "cornflowerblue"], material=material
-        )
-        #fig.savefig(f"Plots/{filename}_{material}.pdf", dpi=300)
-    fig.savefig(f"{savepath}/phys_metrics.png", dpi=300)
-    plt.close(fig)
-
-
-def make_phys_plots(real, gen, material_list=["G4_W"], savepath="./Phys_plots/"):
-    #TODO read the gap_pid and pass it to the plotting function
-    material = material_list[0]
-    gen_dict = {
-        "x": [],
-        "y": [],
-        "z": [],
-        "energy": []
-    }
-    data_dict = {
-        "x": [],
-        "y": [],
-        "z": [],
-        "energy": [],
-    }
-    for i in range(gen.shape[0]):
-        x, y, z, e = real[i].T
-        xg, yg, zg, eg = gen[i].T
-
-
-        gen_dict["x"].append(zg)
-        gen_dict["z"].append(xg)
-        gen_dict["y"].append(yg)
-        gen_dict["energy"].append(eg)
-
-        data_dict["x"].append(z)
-        data_dict["z"].append(x)
-        data_dict["y"].append(y)
-        data_dict["energy"].append(e)
-                
-        ak_array_truth = ak.Array(data_dict)
-        ak_array_gen = ak.Array(gen_dict)
-
-    fig = plot_paper_plots(
-            [ak_array_truth, ak_array_gen],
-            labels=["Ground Truth", "Generated"],
-            colors=["lightgrey", "cornflowerblue"], material=material
-        )
-        #fig.savefig(f"Plots/{filename}_{material}.pdf", dpi=300)
-    fig.savefig(f"{savepath}/phys_metrics.png", dpi=300)
+#NOTE Temporary, move to phys_metrics

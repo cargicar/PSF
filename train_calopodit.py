@@ -200,6 +200,27 @@ def fine_tuning_modulate(model, lr=0.001, decay = 0.01):
     
     return optimizer
 
+def get_constraint_weights(epoch, start_warmup=5, end_warmup=10):
+    """
+    Gradually increases constraint weights after the initial MSE drop.
+    """
+    if epoch < start_warmup:
+        # Initial phase: Focus on MSE
+        return 1.0, 0.01 
+    
+    # Linear ramp-up between start and end epochs
+    progress = min(1.0, (epoch - start_warmup) / (end_warmup - start_warmup))
+    
+    # Target weights (adjust based on your preference)
+    target_energy_w = 10.0
+    target_grid_w = 2.0
+    
+    # Calculate current weight
+    energy_w = 1.0 + (target_energy_w - 1.0) * progress
+    grid_w = 0.01 + (target_grid_w - 0.01) * progress
+    
+    return energy_w, grid_w
+
 def train(gpu, opt, output_dir):
     debug = False
     set_seed(opt)
@@ -336,17 +357,23 @@ def train(gpu, opt, output_dir):
     # div_factor: Initial LR = max_lr / div_factor. Default is 25.
     # final_div_factor: Final LR = Initial LR / final_div_factor. Default is 1e4.
 
-    lr_scheduler = optim.lr_scheduler.OneCycleLR(
+    if start_epoch == 0:
+        lr_scheduler = optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=5e-5,  # Peak LR (Try 1e-4 if 3e-4 is still unstable)
+            #max_lr= 1e-5, 
+            total_steps=total_steps, # Exact number of batch updates
+            pct_start=0.2,           # Warmup for first 20% (2 epochs)
+            anneal_strategy='cos',   # Cosine shape
+            div_factor=25.0,         # Starts at 3e-4 / 25 = 1.2e-5
+            final_div_factor=100.0,  # Ends at 1.2e-5 / 100 = 1.2e-7
+        )
+    else:
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        max_lr=5e-5,  # Peak LR (Try 1e-4 if 3e-4 is still unstable)
-        #max_lr= 1e-5, 
-        total_steps=total_steps, # Exact number of batch updates
-        pct_start=0.2,           # Warmup for first 20% (2 epochs)
-        anneal_strategy='cos',   # Cosine shape
-        div_factor=25.0,         # Starts at 3e-4 / 25 = 1.2e-5
-        final_div_factor=100.0,  # Ends at 1.2e-5 / 100 = 1.2e-7
-    )
-
+        T_max=total_steps,  # Decays smoothly over the remaining steps
+        eta_min=1e-7        # The final learning rate at the very end
+        )
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
         def _transform_(m):
             return nn.parallel.DistributedDataParallel(
@@ -383,7 +410,8 @@ def train(gpu, opt, output_dir):
     #Rectified_Flow
     #rf_criterion = RectifiedFlowLossFunction(loss_type = "mse")
     centers = torch.linspace(0, 29, 30)
-    rf_criterion = MaskedPhysicalRectifiedFlowLoss(centers, loss_type= "mse", energy_weight= 1.0, grid_weight=0.01) #NOTE I am adding a small grid weight to encourage the model to learn the grid structure, but not too much to overpower the energy loss. Adjust as needed.
+    #def __init__(self, centers, loss_type="mse", energy_weight=10.0, grid_weight=10.0, e_channel_weight=20.0):
+    rf_criterion = MaskedPhysicalRectifiedFlowLoss(centers, loss_type= "mse", energy_weight= 10.0, grid_weight=1.0, e_channel_weight=10.0) #NOTE I am adding a small grid weight to encourage the model to learn the grid structure, but not too much to overpower the energy loss. Adjust as needed.
     p_drop = opt.dropout
     
     data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
@@ -454,6 +482,11 @@ def train(gpu, opt, output_dir):
                     
                     #Transform
                     #x = scaler.transform(x, mask=mask)
+                    # coords_raw = x[..., :3]
+                    # energy_raw = x[..., 3:4]
+                    # log_energy = torch.log(energy_raw + 1e-6)
+                    # x = torch.cat([coords_raw, log_energy], dim=-1) # [x, y, z, logE]
+
                     rectified_flow.device = x.device      
                     x_0 = rectified_flow.sample_source_distribution(x.shape[0])
                                         
@@ -470,7 +503,7 @@ def train(gpu, opt, output_dir):
                     else:
                         force_drop_ids = None
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
-                    loss = rectified_flow.get_loss(
+                    loss, loss_mse, loss_sumE, quant_loss = rectified_flow.get_loss(
                                 x_0=x_0,
                                 x_1=x,
                                 y= y,
@@ -478,7 +511,7 @@ def train(gpu, opt, output_dir):
                                 energy=int_energy,
                                 t=t,
                                 mask = mask,
-                                force_drop_ids = force_drop_ids
+                                force_drop_ids = force_drop_ids,
                             )
                     #scaler.scale(loss).backward()
                     loss.backward()
@@ -498,9 +531,9 @@ def train(gpu, opt, output_dir):
 
                     if i % opt.print_freq == 0 and should_diag:
 
-                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    '
+                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    loss_mse: {:>10.4f},    loss_sumE: {:>10.4f},    quant_loss: {:>10.4f}'
                                     .format(
-                                epoch, opt.niter, i, len(dataloader),loss.item()
+                                epoch, opt.niter, i, len(dataloader),loss.item(), loss_mse.item(), loss_sumE.item(), quant_loss.item()
                                 ))
                     #TODO temporary. Instead of eval, save the generation and tested with physics metrics outside this script
                     
@@ -645,7 +678,7 @@ def parse_args():
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/reflow/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=72, help='input batch size')
+    parser.add_argument('--bs', type=int, default=60, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
@@ -686,7 +719,7 @@ def parse_args():
     parser.add_argument('--model_mean_type', default='eps')
     parser.add_argument('--model_var_type', default='fixedsmall')
 
-    parser.add_argument('--lr', type=float, default=1e-6, help='learning rate for E, default=0.0002')
+    parser.add_argument('--lr', type=float, default=5e-5, help='learning rate for E, default=0.0002')
     parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
     parser.add_argument('--decay', type=float, default=0.01, help='weight decay for EBM')
     parser.add_argument('--grad_clip', type=float, default=1.0, help='weight decay for EBM')

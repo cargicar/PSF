@@ -319,18 +319,17 @@ def test(gpu, opt, output_dir, noises_init):
                     cfg_scale=cfg_scale,
                     )
                 pts_norm= traj1.x_t
-                trajectory = traj1.trajectories
+                #trajectory = traj1.trajectories
                 print(f"Rank {gpu}: Generating batch {i}")
                 # Un-Normalize back to real physics units
                 pts = scaler.inverse_transform(pts_norm, mask=mask)
                 #if gpu == 0:
-                save_path = f'{opt.pthsave}_calopodit_samples_Reflow_normalized_Feb_11_1_steps_rank_{gpu}_batch_{i}.pth'
-                save_path2 = f'{opt.pthsave}_calopodit_samples_Reflow_unNormalized_Feb_11_2_steps_rank_{gpu}_batch_{i}.pth'
+                #save_path = f'{opt.pthsave}_calopodit_samples_Reflow_normalized_Feb_11_1_steps_rank_{gpu}_batch_{i}.pth'
+                save_path2 = f'{opt.pthsave}_calopodit_samples_unNormalized_Feb_24_steps_{opt.num_steps}_rank_{gpu}_batch_{i}.pth'
                 
                 #NOTE saving un-normalized for reflow
                 #torch.save([x_0.cpu(), pts_norm.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path)  
                 torch.save([x.cpu(), pts.cpu(), mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path2)  
-                print(f"Batch data saved to {save_path}")
                 
                 # Plotting (only needs to be done on master)
                 # Note: plot_4d_reconstruction might need CPU tensors
@@ -444,7 +443,7 @@ def parse_args():
     parser.add_argument('--category', default='all', help='category of dataset')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=36, help='input batch size')
+    parser.add_argument('--bs', type=int, default=80, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)

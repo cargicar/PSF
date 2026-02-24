@@ -402,7 +402,7 @@ def train(gpu, opt, output_dir):
     #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
     #Rectified_Flow
     #rf_criterion = RectifiedFlowLossFunction(loss_type = "mse")
-    rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 10.0)
+    rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 100.0)
     p_drop = opt.dropout
     
     data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
@@ -596,7 +596,6 @@ def train(gpu, opt, output_dir):
                     #     #make_phys_plots(x, pts, savepath = outf_syn)
                     logger.info('Generation: train')
                     model.train()
-                    
                 if (epoch + 1) % opt.saveIter == 0:
 
                     if should_diag:
@@ -743,8 +742,8 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', type=int, default=2, help='unit: epoch')
-    parser.add_argument('--diagIter', type=int, default=2, help='unit: epoch')
+    parser.add_argument('--saveIter', type=int, default=8, help='unit: epoch')
+    parser.add_argument('--diagIter', type=int, default=8, help='unit: epoch')
     parser.add_argument('--vizIter', type=int, default=8000, help='unit: epoch')
     parser.add_argument('--print_freq', type=int, default=32, help='unit: iter')
 

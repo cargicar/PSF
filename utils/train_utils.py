@@ -276,25 +276,34 @@ class MaskedPhysicalRectifiedFlowLoss(RectifiedFlowLossFunction):
             # We divide by the number of active points in each instance for stability
             points_per_instance = mask.sum(dim=1).clamp(min=1)
             per_instance_loss = masked_sq_diff.sum(dim=(1, 2)) / (points_per_instance * v_t.shape[-1])
+
+            # Velocity toward the target sum: sum(v_t_energy) should match sum(dot_x_t_energy)
+            pred_energy_sum = (v_t[:, :, 3] * mask).sum(dim=1) / points_per_instance
+            target_energy_sum = (dot_x_t[:, :, 3] * mask).sum(dim=1) / points_per_instance
+            
         else:
             # Fallback to standard mean if no mask provided
             per_instance_loss = torch.mean(sq_diff, dim=list(range(1, v_t.dim())))
 
+                        # v_t shape is (Batch, Points, Features)
+            num_points = v_t.shape[1] 
+
+            # Equivalent to points_per_instance for all items in the batch
+            points_per_instance = torch.full((v_t.shape[0],), num_points, device=v_t.device)
+
+            pred_energy_sum = v_t[:, :, 3].sum(dim=1)/ points_per_instance
+            target_energy_sum = dot_x_t[:, :, 3].sum(dim=1)/ points_per_instance
+
+
         # Standard RF weighting
-        loss = torch.mean(time_weights * per_instance_loss)
+        loss_mse = torch.mean(time_weights * per_instance_loss)
 
-        #  Physics Constraint: Energy Conservation
-        # Constrain the sum of velocities in the energy dimension (index 3)
+        #physics loss: enforce sum of predicted energies matches sum of target energies
+        physics_loss = F.mse_loss(pred_energy_sum, target_energy_sum)
+        scale_physics= self.energy_weight * physics_loss
 
-        if mask is not None:
-            # Velocity toward the target sum: sum(v_t_energy) should match sum(dot_x_t_energy)
-            pred_energy_sum = (v_t[:, :, 3] * mask).sum(dim=1)
-            target_energy_sum = (dot_x_t[:, :, 3] * mask).sum(dim=1)
-            
-            physics_loss = F.mse_loss(pred_energy_sum, target_energy_sum)
-            loss = loss + (self.energy_weight * physics_loss)
-
-        return loss
+        loss = loss_mse + scale_physics
+        return loss, loss_mse, scale_physics
     
 @torch.no_grad()
 def validate_reflow_straightness(model, rectified_flow, val_batch, scaler):

@@ -277,29 +277,49 @@ def train(gpu, opt, output_dir):
             optimizer = fine_tuning_modulate(model, lr=opt.lr*0.1, decay=opt.decay)
         else:
             print(f"Loading checkpoint from {opt.model_ckpt}...")
-            ckpt = torch.load(opt.model_ckpt, map_location='cpu') # Always load to CPU first to avoid GPU OOM
-            state_dict = ckpt['model_state']
+            ckpt = torch.load(opt.model_ckpt, map_location='cpu')
+            
+            # Determine the correct key for the state_dict (handles different save formats)
+            state_dict = ckpt.get('model_state', ckpt.get('state_dict', ckpt))
 
-            # Check if the checkpoint was saved from DDP
-            new_state_dict = {}
+            # 1. Clean DDP 'module.' prefix
+            cleaned_state_dict = {}
             for k, v in state_dict.items():
-                if k.startswith('module.'):
-                    name = k[7:] # remove 'module.'
-                else:
-                    name = k
-                new_state_dict[name] = v
-            # -----------------------------------
+                name = k[7:] if k.startswith('module.') else k
+                cleaned_state_dict[name] = v
 
+            # 2. Flexible Filtering: Match keys and verify shapes
+            model_state = model.state_dict()
+            flexible_state_dict = {}
+            mismatched_keys = []
+            
+            for k, v in cleaned_state_dict.items():
+                if k in model_state:
+                    if v.shape == model_state[k].shape:
+                        flexible_state_dict[k] = v
+                    else:
+                        mismatched_keys.append(f"{k} (Expected {model_state[k].shape}, got {v.shape})")
+                # If k is not in model_state, it's an "unexpected key" and we just ignore it
+            
+            # 3. Load the filtered weights
             try:
-                model.load_state_dict(new_state_dict, strict=True)
-                print("Model loaded successfully.")
-            except RuntimeError as e:
-                # If strict loading fails, it might be due to architecture changes 
-                # (e.g., adding CrossAttn or PointEmbedder to an old checkpoint).
-                print(f"Strict loading failed: {e}")
-                print("Attempting non-strict loading (ignoring missing/unexpected keys)...")
-                model.load_state_dict(new_state_dict, strict=False)
-
+                # We still use strict=False here just in case some keys in the 
+                # current model weren't found in the checkpoint (missing keys).
+                model.load_state_dict(flexible_state_dict, strict=False)
+                
+                # Print feedback to the console
+                if len(mismatched_keys) > 0:
+                    print("--- Flexible Loading Warning ---")
+                    print(f"Skipped {len(mismatched_keys)} layers due to shape mismatches:")
+                    for msg in mismatched_keys:
+                        print(f"  - {msg}")
+                    print("---------------------------------")
+                
+                print("Model loaded successfully (flexible mode).")
+                
+            except Exception as e:
+                print(f"Critical error during flexible loading: {e}")
+                
     optimizer = optim.AdamW(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
     if opt.model_ckpt != '':
         start_epoch = torch.load(opt.model_ckpt)['epoch'] + 1
@@ -382,7 +402,7 @@ def train(gpu, opt, output_dir):
     #     return torch.randn(num_chain, *x.shape[1:], device=x.device)
     #Rectified_Flow
     #rf_criterion = RectifiedFlowLossFunction(loss_type = "mse")
-    rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 1.0)
+    rf_criterion = MaskedPhysicalRectifiedFlowLoss(loss_type= "mse", energy_weight= 10.0)
     p_drop = opt.dropout
     
     data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
@@ -414,7 +434,6 @@ def train(gpu, opt, output_dir):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         if opt.is_independent_coupling:
                             x, mask, int_energy, y, gap_pid, idx = data
-                            #TODO I am just gonna used Ta to reflow, correct this later
                             gap_pid = gap_pid.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
                             y = y.long() # safe guard, force cast to long just in case, Critical for nn.Embedding 
                         else:
@@ -468,18 +487,6 @@ def train(gpu, opt, output_dir):
                     else:
                         rectified_flow.device = x_1.device      
 
-                    if debug:
-                        means = x_1.mean(dim=0)
-                        stds= x_1.std(dim=0)
-                        print(f"Channel Means (Target ~0): {means.cpu().numpy()}")
-                        print(f"Channel Stds  (Target ~1): {stds.cpu().numpy()}")
-                        
-                        # Energy Channel Check (Index 3)
-                        if abs(means[3]) > 0.5 or abs(stds[3] - 1.0) > 0.5:
-                            print("WARNING: Energy channel normalization is OFF. Check dataset stats.")
-                        else:
-                            print("Normalization looks healthy.")
-
                     #with autocast(enabled=True):
                     if opt.model_name == "pvcnn2":
                         x_0 = x_0.transpose(1,2)
@@ -493,7 +500,7 @@ def train(gpu, opt, output_dir):
                     else:
                         force_drop_ids = None
                     #NOTE to pass the mask to the loss function, we have edited rectified_flow.get_loss.criterion(mask=kwargs.get(mask))
-                    loss = rectified_flow.get_loss(
+                    loss, loss_mse, physics_loss = rectified_flow.get_loss(
                                 x_0=x_0,
                                 x_1=x_1,
                                 y= y,
@@ -521,9 +528,9 @@ def train(gpu, opt, output_dir):
 
                     if i % opt.print_freq == 0 and should_diag:
 
-                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    '
+                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    loss_mse: {:>10.4f},    physics_loss: {:>10.4f}'
                                     .format(
-                                epoch, opt.niter, i, len(dataloader),loss.item()
+                                epoch, opt.niter, i, len(dataloader), loss.item(), loss_mse.item(), physics_loss.item()
                                 ))
                     #TODO temporary. Instead of eval, save the generation and tested with physics metrics outside this script
                     
@@ -660,15 +667,15 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')
-    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/')# Training two class
+    #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/')# Training two class
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/') #Finetuning
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/pth/reflow/combined_batches_reflow_calopodit_Normalized_Feb_10_500_steps.pth') #Reflow
     parser.add_argument('--category', default='all', help='category of dataset')
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/reflow/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=72, help='input batch size')
+    parser.add_argument('--bs', type=int, default=80, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
@@ -736,8 +743,8 @@ def parse_args():
                         help='GPU id to use. None means using all available GPUs.')
 
     '''eval'''
-    parser.add_argument('--saveIter', type=int, default=20, help='unit: epoch')
-    parser.add_argument('--diagIter', type=int, default=20, help='unit: epoch')
+    parser.add_argument('--saveIter', type=int, default=2, help='unit: epoch')
+    parser.add_argument('--diagIter', type=int, default=2, help='unit: epoch')
     parser.add_argument('--vizIter', type=int, default=8000, help='unit: epoch')
     parser.add_argument('--print_freq', type=int, default=32, help='unit: iter')
 

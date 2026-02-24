@@ -238,7 +238,7 @@ def test(gpu, opt, output_dir, noises_init):
     # 1.0 = No guidance (standard), 4.0 = Strong guidanc
     #TODO create args for cfg scale
     #cfg_scale = 2.0
-    cfg_scale = 1.0
+    cfg_scale = 1.2
     masks =[]
     xs = []
     recons = []
@@ -437,7 +437,7 @@ def parse_args():
     #parser.add_argument('--dataroot', default='/data/ccardona/datasets/ShapeNetCore.v2.PC15k/')
     #parser.add_argument('--dataroot', default='/pscratch/sd/c/ccardona/datasets/G4_individual_sims_pkl_e_liquidArgon_50/')
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_1mill/')
-    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/')# Training
+    parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train/')# Training
     #parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/finetune/')
     #parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/')
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/') #reflow

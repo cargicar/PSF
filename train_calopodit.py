@@ -384,10 +384,10 @@ def train(gpu, opt, output_dir):
     if start_epoch < 20: 
         lr_scheduler = optim.lr_scheduler.OneCycleLR(
             optimizer,
-            max_lr=5e-5,  # Peak LR (Try 1e-4 if 3e-4 is still unstable)
+            max_lr=8e-5,  # Peak LR (Try 1e-4 if 3e-4 is still unstable)
             #max_lr= 1e-5, 
             total_steps=total_steps, # Exact number of batch updates
-            pct_start=0.2,           # Warmup for first 20% (2 epochs)
+            pct_start=0.1,           # Warmup for first 20% (2 epochs)
             anneal_strategy='cos',   # Cosine shape
             div_factor=25.0,         # Starts at 3e-4 / 25 = 1.2e-5
             final_div_factor=100.0,  # Ends at 1.2e-5 / 100 = 1.2e-7

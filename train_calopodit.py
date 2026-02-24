@@ -200,26 +200,49 @@ def fine_tuning_modulate(model, lr=0.001, decay = 0.01):
     
     return optimizer
 
-def get_constraint_weights(epoch, start_warmup=5, end_warmup=10):
+def get_constraint_weights(epoch, start_warmup=2, end_warmup=10):
     """
     Gradually increases constraint weights after the initial MSE drop.
     """
     if epoch < start_warmup:
         # Initial phase: Focus on MSE
-        return 1.0, 0.01 
+        return 1.0, 0.01, 10.0
     
     # Linear ramp-up between start and end epochs
     progress = min(1.0, (epoch - start_warmup) / (end_warmup - start_warmup))
     
     # Target weights (adjust based on your preference)
-    target_energy_w = 10.0
+    target_energy_w = 30.0
     target_grid_w = 2.0
+    target_e_channel_w = 40.0
     
     # Calculate current weight
     energy_w = 1.0 + (target_energy_w - 1.0) * progress
     grid_w = 0.01 + (target_grid_w - 0.01) * progress
+    e_channel_w = 1.0 + (target_e_channel_w - 10.0) * progress
+
+    return energy_w, grid_w, e_channel_w
+
+def get_constraint_weights_correction(epoch, total_epochs=5):
+    """
+    Fine-tuning schedule: Focuses on hit-level energy and prevents voxel-merging.
+    """
+    # We assume we are starting from the Epoch 10 checkpoint.
+    # Linear ramp over the final 5 epochs.
+    progress = epoch / total_epochs
     
-    return energy_w, grid_w
+    # 1. Lower Grid Weight: 1.5 provides guidance without crushing the physics.
+    # High weights (5.0) were causing the hit deficit seen in plots.
+    grid_w = 1.0 + (0.5 * progress) 
+    
+    # 2. Strong Energy Sum: Keeps the global shower budget on target.
+    energy_sum_w = 20.0 + (10.0 * progress)
+    
+    # 3. Aggressive Hit Energy: Prevents multiple points from merging into one voxel.
+    # This forces the model to spread points out to reach the 1000-hit target.
+    e_channel_w = 30.0 + (30.0 * progress) # Ramps 30.0 -> 60.0
+    
+    return energy_sum_w, grid_w, e_channel_w
 
 def train(gpu, opt, output_dir):
     debug = False
@@ -279,13 +302,14 @@ def train(gpu, opt, output_dir):
             num_classes = opt.num_classes if hasattr(opt, 'num_classes') else 0,
             gap_classes = opt.gap_classes if hasattr(opt, 'gap_classes') else 0,
             out_channels=4, #opt.out_channels,
-            hidden_size=128,
+            hidden_size=256,
             depth=13,
-            num_heads=8,
+            num_heads=16,
             mlp_ratio=4,
             use_long_skip=True,
         )
         model = DiT(DiT_config)
+        model.initialize_weights()
     else:
         print(f"Model {opt.model_name} not implemented or not included in this script")
     
@@ -357,7 +381,7 @@ def train(gpu, opt, output_dir):
     # div_factor: Initial LR = max_lr / div_factor. Default is 25.
     # final_div_factor: Final LR = Initial LR / final_div_factor. Default is 1e4.
 
-    if start_epoch == 0:
+    if start_epoch < 20: 
         lr_scheduler = optim.lr_scheduler.OneCycleLR(
             optimizer,
             max_lr=5e-5,  # Peak LR (Try 1e-4 if 3e-4 is still unstable)
@@ -369,10 +393,13 @@ def train(gpu, opt, output_dir):
             final_div_factor=100.0,  # Ends at 1.2e-5 / 100 = 1.2e-7
         )
     else:
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = opt.lr  
+        print(f"training start at epoch {start_epoch} at LR {opt.lr}. Using CosineAnnealingLR for the remaining epochs.")
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=total_steps,  # Decays smoothly over the remaining steps
-        eta_min=1e-7        # The final learning rate at the very end
+        eta_min=7e-7        # The final learning rate at the very end
         )
     if opt.distribution_type == 'multi':  # Multiple processes, single GPU per process
         def _transform_(m):
@@ -411,7 +438,8 @@ def train(gpu, opt, output_dir):
     #rf_criterion = RectifiedFlowLossFunction(loss_type = "mse")
     centers = torch.linspace(0, 29, 30)
     #def __init__(self, centers, loss_type="mse", energy_weight=10.0, grid_weight=10.0, e_channel_weight=20.0):
-    rf_criterion = MaskedPhysicalRectifiedFlowLoss(centers, loss_type= "mse", energy_weight= 10.0, grid_weight=1.0, e_channel_weight=10.0) #NOTE I am adding a small grid weight to encourage the model to learn the grid structure, but not too much to overpower the energy loss. Adjust as needed.
+    rf_criterion = MaskedPhysicalRectifiedFlowLoss(centers, loss_type= "mse", energy_weight= 10.0, grid_weight=1.0, e_channel_weight=10.0) 
+    #NOTE I am adding a small grid weight to encourage the model to learn the grid structure, but not too much to overpower the energy loss. Adjust as needed.
     p_drop = opt.dropout
     
     data_shape = (train_dataset.max_particles, opt.nc)  # (N, 4) 4 for (x,y,z,energy)
@@ -439,6 +467,14 @@ def train(gpu, opt, output_dir):
                     train_sampler.set_epoch(epoch)
                 #lr_scheduler.step(epoch) #seem to be deprecated?
                 #lr_scheduler.step()
+                new_energy_w, new_grid_w, new_e_channel_w = get_constraint_weights_correction(epoch)
+                print(f"Epoch {epoch}: Setting grid weight to {new_grid_w:.4f}, energy weight to {new_energy_w:.4f}, and e_channel weight to {new_e_channel_w:.4f}")
+                
+                #  Update the loss attributes 
+                rf_criterion.energy_weight = new_energy_w
+                rf_criterion.grid_weight = new_grid_w
+                rf_criterion.e_channel_weight = new_e_channel_w
+
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
                         if opt.is_independent_coupling:
@@ -525,16 +561,21 @@ def train(gpu, opt, output_dir):
                     #scaler.step(optimizer)
                     lr_scheduler.step() #FIXME or #TODO doing lr updates per batch
                     optimizer.step()
+                    current_lr = lr_scheduler.get_last_lr()[0]
                     #scaler.update()
                     if prof is not None:
                         prof.step()
 
                     if i % opt.print_freq == 0 and should_diag:
 
-                        logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    loss_mse: {:>10.4f},    loss_sumE: {:>10.4f},    quant_loss: {:>10.4f}'
-                                    .format(
-                                epoch, opt.niter, i, len(dataloader),loss.item(), loss_mse.item(), loss_sumE.item(), quant_loss.item()
-                                ))
+                        logger.info(
+                            f"[{epoch}/{opt.niter}][{i}/{len(dataloader)}] "
+                            f"LR: {current_lr:.2e} | "
+                            f"loss: {loss.item():.4f}, "
+                            f"loss_mse: {loss_mse.item():.4f}, "
+                            f"loss_sumE: {loss_sumE.item():.4f}, "
+                            f"quant_loss: {quant_loss.item():.4f}"
+                        )
                     #TODO temporary. Instead of eval, save the generation and tested with physics metrics outside this script
                     
                 if (epoch + 1) % opt.vizIter == 0 and should_diag:
@@ -678,7 +719,7 @@ def parse_args():
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/reflow/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=60, help='input batch size')
+    parser.add_argument('--bs', type=int, default=30, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)
@@ -719,7 +760,7 @@ def parse_args():
     parser.add_argument('--model_mean_type', default='eps')
     parser.add_argument('--model_var_type', default='fixedsmall')
 
-    parser.add_argument('--lr', type=float, default=5e-5, help='learning rate for E, default=0.0002')
+    parser.add_argument('--lr', type=float, default=1e-5, help='learning rate for E, default=0.0002')
     parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
     parser.add_argument('--decay', type=float, default=0.01, help='weight decay for EBM')
     parser.add_argument('--grad_clip', type=float, default=1.0, help='weight decay for EBM')

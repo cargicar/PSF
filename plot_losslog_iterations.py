@@ -47,7 +47,9 @@ def plot_loss_from_log(file_path, start_ite = 20):
     
     # Regex to parse the log line
     #pattern = re.compile(r'\[\s*(\d+)[^\]]*\]\[\s*(\d+)/(\d+)\]\s+loss:\s+([\d\.]+)')
-    pattern = re.compile(r'\[\s*(\d+)[^\]]*\]\[\s*(\d+)\s*/\s*(\d+)\]\s+loss:\s+([\d\.]+)')
+    pattern = re.compile(
+    r'\[\s*(\d+)[^\]]*\]\[\s*(\d+)\s*/\s*(\d+)\]\s*LR:\s*[\d\.e\-]+\s*\|\s*loss:\s*([\d\.]+),\s*loss_mse:\s*([\d\.]+),\s*loss_sumE:\s*([\d\.]+),\s*quant_loss:\s*([\d\.]+)'
+)
 
     try:
         with open(file_path, 'r') as f:
@@ -74,7 +76,7 @@ def plot_loss_from_log(file_path, start_ite = 20):
 
     # --- SMOOTHING LOGIC ---
     # Define how many points to average over (adjust this to make it smoother/sharper)
-    window_size = 50
+    window_size = 10
     
     # Adjust iterations to match the length of smoothed data 
     # (Convolution with mode='valid' shortens the array by window_size - 1)
@@ -117,4 +119,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         log_file = sys.argv[1]
         
-    plot_loss_from_log(full_path, start_ite=0)
+    plot_loss_from_log(full_path, start_ite=40)

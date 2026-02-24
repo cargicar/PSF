@@ -142,9 +142,9 @@ def test(gpu, opt, output_dir, noises_init):
             num_classes = opt.num_classes if hasattr(opt, 'num_classes') else 0,
             gap_classes = opt.gap_classes if hasattr(opt, 'gap_classes') else 0,
             out_channels=4, #opt.out_channels,
-            hidden_size=128,
+            hidden_size=256,
             depth=13,
-            num_heads=8,
+            num_heads=16,
             mlp_ratio=4,
             use_long_skip=True,
         )
@@ -355,9 +355,9 @@ def test(gpu, opt, output_dir, noises_init):
                 xenergy_raw = torch.clamp(xenergy_raw, min=0.0)
                 x = torch.cat([xcoords, xenergy_raw], dim=-1)
 
-                save_path2 = f'{opt.pthsave}_calopodit_unNormalized_Feb_23_steps_{num_steps}_rank_{gpu}_batch_{i}.pth'
+                save_path2 = f'{opt.pthsave}_calopodit_Normalized_Feb_24_steps_{num_steps}_rank_{gpu}_batch_{i}.pth'
                 
-                # CRITICAL: Save new_mask, not mask!
+                # Save new_mask, not mask!
                 torch.save([x.cpu(), pts.cpu(), new_mask.cpu(), int_energy.cpu(), gap_pid.cpu()], save_path2)  
                 print(f"Batch data saved to {save_path2}")           
                 # Plotting (only needs to be done on master)

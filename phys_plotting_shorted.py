@@ -488,7 +488,7 @@ def read_generated(
 
                 # 5. Apply Arbitrary Threshold Cut
                 # (Optional cleanup for ultra-low noise hits)
-                if energy_threshold > 0.1:
+                if energy_threshold > 0.0:
                     valid_mask = eg > energy_threshold
                     xg = xg[valid_mask]
                     yg = yg[valid_mask]
@@ -613,8 +613,8 @@ if __name__ == "__main__":
     material = "G4_W"
     date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     target_directory = "/pscratch/sd/c/ccardona/datasets/pth/" 
-    pattern = "_calopodit_unNormalized_Feb_23_steps_500_rank_*.pth"
-    output_file = f"{target_directory}/combined_batches_calopodit_UnNormalized_Feb_23_500_steps.pth"
+    pattern = "_calopodit_Normalized_Feb_24_steps_300_rank_*.pth"
+    output_file = f"{target_directory}/combined_batches_calopodit_Normalized_Feb_24_300_steps.pth"
     
     combine_pth_files(target_directory, output_file, pattern= pattern)
 
@@ -640,4 +640,4 @@ if __name__ == "__main__":
         filepaths = args.dataroot
     else:
         filepaths = [args.dataroot, args.genroot]
-    make_plots(filepaths, num_showers=args.num_showers, title = args.title, material= material, enforce_conservation=True)
+    make_plots(filepaths, num_showers=args.num_showers, title = args.title, material= material, enforce_conservation=False)

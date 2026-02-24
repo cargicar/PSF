@@ -49,6 +49,55 @@ class VoxelGridEmbedder(nn.Module):
 
         return self.proj(torch.cat([feat_x, feat_y, feat_z], dim=-1))    
     
+class EpicLayer(nn.Module):
+    """
+    EPiC-style pooling block: Local-to-Global and Global-to-Local communication.
+    Extracts global cloud context and injects it back into individual points.
+    """
+    def __init__(self, hidden_dim, expansion_factor=2):
+        super().__init__()
+        self.local_mlp1 = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * expansion_factor),
+            nn.SiLU(),
+            nn.Linear(hidden_dim * expansion_factor, hidden_dim)
+        )
+        # Increased capacity in the global processing path
+        self.global_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * expansion_factor),
+            nn.SiLU(),
+            nn.Linear(hidden_dim * expansion_factor, hidden_dim * expansion_factor),
+            nn.SiLU(),
+            nn.Linear(hidden_dim * expansion_factor, hidden_dim)
+        )
+        self.local_mlp2 = nn.Linear(hidden_dim * 2, hidden_dim)
+
+    def forward(self, x, mask=None):
+        # 1. Local Processing
+        h_local = self.local_mlp1(x)
+
+        # 2. Masked Global Pooling (Extracting the "Cloud Context")
+        if mask is not None:
+            mask_expanded = mask.unsqueeze(-1).float()
+            h_local_masked = h_local * mask_expanded
+            # Sum over points, then divide by valid points to get the Mean
+            sum_feat = h_local_masked.sum(dim=1, keepdim=True)
+            num_valid = mask.sum(dim=1, keepdim=True).unsqueeze(-1).clamp(min=1)
+            global_feat = sum_feat / num_valid
+        else:
+            global_feat = h_local.mean(dim=1, keepdim=True)
+
+        # 3. Global Processing
+        global_feat = self.global_mlp(global_feat)
+
+        # 4. Broadcast and Update Local Points
+        global_feat_expanded = global_feat.expand(-1, x.size(1), -1)
+        
+        # Concatenate original local feature with the new global feature
+        x_updated = self.local_mlp2(torch.cat([x, global_feat_expanded], dim=-1))
+        
+        # Residual connection
+        return x + x_updated
+    
 # Replaces nn.MultiheadAttention with optimized F.scaled_dot_product_attention
 class NativeAttention(nn.Module):
     def __init__(self, dim, num_heads, qkv_bias=True, attn_drop=0., proj_drop=0.):
@@ -552,6 +601,7 @@ class DiT(nn.Module):
         self.out_channels = config.out_channels
         self.patch_size = config.patch_size
         self.num_heads = config.num_heads
+        self.expansion_factor = config.mlp_ratio
 
         
         self.grid_bias = VoxelGridEmbedder(config.hidden_size, grid_dims=(30, 30, 30))
@@ -566,6 +616,20 @@ class DiT(nn.Module):
         self.pos_embedder = FourierSpatialEmbedder(config.hidden_size, base_scale=0.04) #NOTE base_scale =1/grid_scale
         
         self.t_embedder = TimestepEmbedder(config.hidden_size)
+
+        # We project the large hidden_size conditions down to 32 dims to append to the 4D input
+        self.global_inject_proj = nn.Sequential(
+            nn.Linear(config.hidden_size, 32),
+            nn.SiLU()
+        )
+        # Fuses the [X, Y, Z, E] (4) + [Global Context] (32) back to config.in_features (4)
+        # This allows your existing PointEmbedder to work without changing its config
+        self.input_fusion = nn.Linear(4 + 32, config.in_features)
+
+        # --- EPiC LAYER ---
+        # Inserted after PointEmbedder and spatial encodings, before the deep DiT Blocks
+        self.epic_layer_in = EpicLayer(config.hidden_size, expansion_factor=self.expansion_factor)
+        self.epic_layer_out = EpicLayer(config.hidden_size, expansion_factor=self.expansion_factor)
 
         if config.num_classes > 0:  # conditional generation on particle labels
             self.y_embedder = LabelEmbedder(
@@ -639,7 +703,16 @@ class DiT(nn.Module):
             # Zero out null_embedding so unconditional = "neutral" energy
             nn.init.zeros_(self.e_embedder.null_embedding)
 
-        # 3. Fourier Log-Scale Initialization
+        # EPiC Layer Initialization (Zero-init Final Projections)
+        # We zero-init local_mlp2 so that: Output = Local_Feat + 0 * Global_Feat
+        if hasattr(self, "epic_layer_in"):
+            nn.init.constant_(self.epic_layer_in.local_mlp2.weight, 0)
+            nn.init.constant_(self.epic_layer_in.local_mlp2.bias, 0)
+        
+        if hasattr(self, "epic_layer_out"):
+            nn.init.constant_(self.epic_layer_out.local_mlp2.weight, 0)
+            nn.init.constant_(self.epic_layer_out.local_mlp2.bias, 0)
+        #  Fourier Log-Scale Initialization
         # Initializing log_scale to 0 makes exp(0) = 1.0 (The base_scale)
         if hasattr(self.pos_embedder, "log_scale"):
             nn.init.constant_(self.pos_embedder.log_scale, 0.0)
@@ -733,6 +806,7 @@ class DiT(nn.Module):
         #pos_emb = self.pos_embedder(coords_raw)
         pos_emb = self.pos_embedder(coords_scaled)
 
+        c = self.t_embedder(t)
         # 4. Tokenize (Point Transformer)
         x_features = self.x_embedder(x_scaled, mask=mask)
 
@@ -750,7 +824,8 @@ class DiT(nn.Module):
         
         # We collect them into a list
         context_tokens = []
-        
+        global_cond_sum = c.clone() # Start with Time as the initial global condition
+
         if hasattr(self, "y_embedder") and y is not None:
             y_emb = self.y_embedder(y, self.training, force_drop_ids)
             context_tokens.append(y_emb.unsqueeze(1)) 
@@ -769,7 +844,30 @@ class DiT(nn.Module):
         else:
             # Fallback: create a zero context (Batch, 1, Hidden)
             context = torch.zeros(x.shape[0], 1, self.config.hidden_size, device=x.device)
-        #  -----Transformer Backbone with Checkpointing -----
+        
+        # ---GLOBAL INJECTION ---
+        # Project global context from hidden_size -> 32
+        global_inj = self.global_inject_proj(global_cond_sum) # (B, 32)
+        # Expand to match point cloud sequence length
+        global_inj_expanded = global_inj.unsqueeze(1).expand(-1, x.shape[1], -1) # (B, N, 32)
+        
+        # Concatenate and fuse back to 4 dimensions
+        x_injected = torch.cat([x_scaled, global_inj_expanded], dim=-1) # (B, N, 36)
+        x_fused = self.input_fusion(x_injected) # (B, N, 4)
+
+        # 4. Tokenize (Point Transformer now sees the injected data)
+        x_features = self.x_embedder(x_fused, mask=mask)
+
+        # 5. Combine Spatial Encodings
+        x = x_features + pos_emb + grid_anchor
+        x = self.embed_norm(x)
+
+        # --- NEW: EPIC POOLING LAYER ---
+        # Share information globally across all points before deep attention
+        x = self.epic_layer_in(x, mask=mask)
+
+        
+        #  -----Transformer Backbone with Checkpointing-----
         skips = []
         for block in self.in_blocks:
             # Pass key_padding_mask instead of raw mask
@@ -781,6 +879,7 @@ class DiT(nn.Module):
         for block in self.out_blocks:
             x_skip = skips.pop()
             x = checkpoint(block, x, c, context, key_padding_mask, x_skip, use_reentrant=False)
+            x = self.epic_layer_out(x, mask=mask)
 
         # 5. Output
         x = self.final_layer(x, c) 

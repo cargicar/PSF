@@ -622,7 +622,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot generated showers vs ground truth")
     #parser.add_argument("--file_path", type=str, required=True, help="Path to the HDF5 file containing generated showers")
     if material == "G4_W":
-        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/w_sim/photon-shower-0_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
+        parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/w_sim/photon-shower-1_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
     if material == "G4_Ta":
         parser.add_argument('--dataroot', default='/global/cfs/cdirs/m3246/hep_ai/ILD_debug/train_dbg/ta_sim/photon-shower-0_corrected_compressed.hdf5') #For the case when we want to read the original data from the original dataset hdf5 files
     if material == "G4_Pb":

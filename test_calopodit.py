@@ -238,7 +238,7 @@ def test(gpu, opt, output_dir, noises_init):
     # 1.0 = No guidance (standard), 4.0 = Strong guidanc
     #TODO create args for cfg scale
     #cfg_scale = 2.0
-    cfg_scale = 1.2
+    cfg_scale = 4.0
     masks =[]
     xs = []
     recons = []

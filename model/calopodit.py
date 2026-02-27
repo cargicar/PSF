@@ -612,7 +612,6 @@ class DiT(nn.Module):
         self.embed_norm = nn.LayerNorm(config.hidden_size, elementwise_affine=False, eps=1e-6) #to stabilize variance before DiTBlocks
 
         #self.pos_embedder = SineSpatialEmbedder(config.hidden_size)
-        #TODO try later as a replacement for SineSpatialEmbbeder
         self.pos_embedder = FourierSpatialEmbedder(config.hidden_size, base_scale=0.04) #NOTE base_scale =1/grid_scale
         
         self.t_embedder = TimestepEmbedder(config.hidden_size)
@@ -629,7 +628,7 @@ class DiT(nn.Module):
         # --- EPiC LAYER ---
         # Inserted after PointEmbedder and spatial encodings, before the deep DiT Blocks
         self.epic_layer_in = EpicLayer(config.hidden_size, expansion_factor=self.expansion_factor)
-        self.epic_layer_out = EpicLayer(config.hidden_size, expansion_factor=self.expansion_factor)
+        #self.epic_layer_out = EpicLayer(config.hidden_size, expansion_factor=self.expansion_factor)
 
         if config.num_classes > 0:  # conditional generation on particle labels
             self.y_embedder = LabelEmbedder(
@@ -879,7 +878,7 @@ class DiT(nn.Module):
         for block in self.out_blocks:
             x_skip = skips.pop()
             x = checkpoint(block, x, c, context, key_padding_mask, x_skip, use_reentrant=False)
-            x = self.epic_layer_out(x, mask=mask)
+            #x = self.epic_layer_out(x, mask=mask)
 
         # 5. Output
         x = self.final_layer(x, c) 

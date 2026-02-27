@@ -588,6 +588,7 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
                 material = "G4_W",
                 num_showers=-1,
                 title= None,
+                energy_threshold=0.0,
                 enforce_conservation = False):
     #filepath[0] : simulation data
     #filepath[1] : generated data
@@ -596,7 +597,11 @@ def make_plots(file_paths: list[str], #list containig file paths for simulation 
 
     #for material in material_list:
     if isinstance(file_paths, list):
-        generated_features, ground_truth_features = read_generated(file_paths, material_list, num_showers, material, enforce_conservation = enforce_conservation)
+        generated_features, ground_truth_features = read_generated(file_paths,
+                                                                    material_list, 
+                                                                    num_showers, material, 
+                                                                    energy_threshold=energy_threshold,
+                                                                    enforce_conservation = enforce_conservation)
     else:
         generated_features, ground_truth_features = read_generated_pth(file_paths, num_showers)
     fig = plot_paper_plots(
@@ -613,8 +618,8 @@ if __name__ == "__main__":
     material = "G4_W"
     date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     target_directory = "/pscratch/sd/c/ccardona/datasets/pth/" 
-    pattern = "_calopodit_Normalized_Feb_24_steps_300_rank_*.pth"
-    output_file = f"{target_directory}/combined_batches_calopodit_Normalized_Feb_24_300_steps.pth"
+    pattern = "_calopodit_Normalized_Feb_25_steps_300_rank_*.pth"
+    output_file = f"{target_directory}/combined_batches_calopodit_Normalized_Feb_25_300_steps.pth"
     
     combine_pth_files(target_directory, output_file, pattern= pattern)
 
@@ -640,4 +645,4 @@ if __name__ == "__main__":
         filepaths = args.dataroot
     else:
         filepaths = [args.dataroot, args.genroot]
-    make_plots(filepaths, num_showers=args.num_showers, title = args.title, material= material, enforce_conservation=False)
+    make_plots(filepaths, num_showers=args.num_showers, title = args.title, material= material, enforce_conservation=False, energy_threshold=0.0)

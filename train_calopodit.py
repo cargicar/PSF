@@ -200,49 +200,45 @@ def fine_tuning_modulate(model, lr=0.001, decay = 0.01):
     
     return optimizer
 
-def get_constraint_weights(epoch, start_warmup=2, end_warmup=10):
+# def get_constraint_weights(epoch, start_warmup=1, end_warmup=10, flat= True):
+#     """
+#     Gradually increases constraint weights after the initial MSE drop.
+#     """
+#     if epoch < start_warmup:
+#         # Initial phase: Focus on MSE
+#         return 1.0, 0.01, 10.0
+#     if flat:
+#         return 20.0, 1.0, 100.0
+#     # Linear ramp-up between start and end epochs
+#     progress = min(1.0, (epoch - start_warmup) / (end_warmup - start_warmup))
+    
+#     # Target weights (adjust based on your preference)
+#     target_energy_w = 30.0
+#     target_grid_w = 2.0
+#     target_e_channel_w = 20.0
+    
+#     # Calculate current weight
+#     energy_w = 1.0 + (target_energy_w - 1.0) * progress
+#     grid_w = 0.01 + (target_grid_w - 0.01) * progress
+#     e_channel_w = 1.0 + (target_e_channel_w - 10.0) * progress
+
+#     return energy_w, grid_w, e_channel_w
+
+
+def get_constraint_weights(epoch, between_epochs = 2):
     """
     Gradually increases constraint weights after the initial MSE drop.
     """
-    if epoch < start_warmup:
+
+    if epoch < between_epochs:
         # Initial phase: Focus on MSE
-        return 1.0, 0.01, 10.0
-    
-    # Linear ramp-up between start and end epochs
-    progress = min(1.0, (epoch - start_warmup) / (end_warmup - start_warmup))
-    
-    # Target weights (adjust based on your preference)
-    target_energy_w = 30.0
-    target_grid_w = 2.0
-    target_e_channel_w = 40.0
-    
-    # Calculate current weight
-    energy_w = 1.0 + (target_energy_w - 1.0) * progress
-    grid_w = 0.01 + (target_grid_w - 0.01) * progress
-    e_channel_w = 1.0 + (target_e_channel_w - 10.0) * progress
-
-    return energy_w, grid_w, e_channel_w
-
-def get_constraint_weights_correction(epoch, total_epochs=5):
-    """
-    Fine-tuning schedule: Focuses on hit-level energy and prevents voxel-merging.
-    """
-    # We assume we are starting from the Epoch 10 checkpoint.
-    # Linear ramp over the final 5 epochs.
-    progress = epoch / total_epochs
-    
-    # 1. Lower Grid Weight: 1.5 provides guidance without crushing the physics.
-    # High weights (5.0) were causing the hit deficit seen in plots.
-    grid_w = 1.0 + (0.5 * progress) 
-    
-    # 2. Strong Energy Sum: Keeps the global shower budget on target.
-    energy_sum_w = 20.0 + (10.0 * progress)
-    
-    # 3. Aggressive Hit Energy: Prevents multiple points from merging into one voxel.
-    # This forces the model to spread points out to reach the 1000-hit target.
-    e_channel_w = 30.0 + (30.0 * progress) # Ramps 30.0 -> 60.0
-    
-    return energy_sum_w, grid_w, e_channel_w
+        return 1.0, 0.0, 10.0
+    elif epoch >= between_epochs and epoch < between_epochs + 3:
+        return 20.0, 0.01, 50.0
+    elif epoch >= between_epochs+3 and epoch < between_epochs + 6:
+        return 40.0, 0.5, 100.0
+    else:
+        return 60.0, 1.0, 200.0
 
 def train(gpu, opt, output_dir):
     debug = False
@@ -302,10 +298,10 @@ def train(gpu, opt, output_dir):
             num_classes = opt.num_classes if hasattr(opt, 'num_classes') else 0,
             gap_classes = opt.gap_classes if hasattr(opt, 'gap_classes') else 0,
             out_channels=4, #opt.out_channels,
-            hidden_size=256,
+            hidden_size=128,
             depth=13,
-            num_heads=16,
-            mlp_ratio=4,
+            num_heads=8,
+            mlp_ratio=2,
             use_long_skip=True,
         )
         model = DiT(DiT_config)
@@ -315,36 +311,50 @@ def train(gpu, opt, output_dir):
     
     
     # Load model checkpoint and define optimizer
+    # Load model checkpoint and define optimizer
     if opt.model_ckpt != '':
         if opt.fine_tuning:
-            # Your existing fine-tuning logic
+            # Your existing fine-tuning surgery logic
             model = load_checkpoint_with_gap_surgery(model, opt.model_ckpt, new_gap_classes=opt.gap_classes) 
             optimizer = fine_tuning_modulate(model, lr=opt.lr*0.1, decay=opt.decay)
         else:
             print(f"Loading checkpoint from {opt.model_ckpt}...")
-            ckpt = torch.load(opt.model_ckpt, map_location='cpu') # Always load to CPU first to avoid GPU OOM
-            state_dict = ckpt['model_state']
+            ckpt = torch.load(opt.model_ckpt, map_location='cpu')
+            state_dict = ckpt['model_state'] if 'model_state' in ckpt else ckpt
 
-            # Check if the checkpoint was saved from DDP
-            new_state_dict = {}
-            for k, v in state_dict.items():
-                if k.startswith('module.'):
-                    name = k[7:] # remove 'module.'
+            # 1. Strip 'module.' prefix from DDP saving
+            pretrained_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+            
+            # 2. Get current model state for comparison
+            model_dict = model.state_dict()
+            
+            # 3. Smart Filter: Match by key existence AND shape compatibility
+            # This allows you to load a hidden_size=128 backbone into a 256 model
+            # while skipping incompatible attention/MLP layers.
+            load_dict = {}
+            skipped_keys = []
+
+            for k, v in pretrained_dict.items():
+                if k in model_dict:
+                    if v.shape == model_dict[k].shape:
+                        load_dict[k] = v
+                    else:
+                        skipped_keys.append(f"{k} (Shape mismatch: {list(v.shape)} vs {list(model_dict[k].shape)})")
                 else:
-                    name = k
-                new_state_dict[name] = v
-            # -----------------------------------
+                    skipped_keys.append(f"{k} (Not in current model)")
 
-            try:
-                model.load_state_dict(new_state_dict, strict=True)
-                print("Model loaded successfully.")
-            except RuntimeError as e:
-                # If strict loading fails, it might be due to architecture changes 
-                # (e.g., adding CrossAttn or PointEmbedder to an old checkpoint).
-                print(f"Strict loading failed: {e}")
-                print("Attempting non-strict loading (ignoring missing/unexpected keys)...")
-                model.load_state_dict(new_state_dict, strict=False)
+            # 4. Final Load
+            # We use strict=False to ignore the new layers (EPiC, GridBias, etc.)
+            # which will keep their fresh initialize_weights() values.
+            model.load_state_dict(load_dict, strict=False)
+            
+            print(f"Successfully loaded {len(load_dict)} parameter groups.")
+            if len(skipped_keys) > 0:
+                print(f"Skipped {len(skipped_keys)} incompatible keys (likely due to hidden_size change).")
+            print("New layers (EPiC, GridBias, Injection) initialized from scratch.")
 
+    # Define optimizer after loading weights
+    optimizer = optim.AdamW(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
     optimizer = optim.AdamW(model.parameters(), lr=opt.lr, weight_decay=opt.decay, betas=(opt.beta1, 0.999))
     if opt.model_ckpt != '':
         start_epoch = torch.load(opt.model_ckpt)['epoch'] + 1
@@ -381,11 +391,10 @@ def train(gpu, opt, output_dir):
     # div_factor: Initial LR = max_lr / div_factor. Default is 25.
     # final_div_factor: Final LR = Initial LR / final_div_factor. Default is 1e4.
 
-    if start_epoch < 20: 
+    if start_epoch ==0 : 
         lr_scheduler = optim.lr_scheduler.OneCycleLR(
             optimizer,
-            max_lr=8e-5,  # Peak LR (Try 1e-4 if 3e-4 is still unstable)
-            #max_lr= 1e-5, 
+            max_lr= 7e-5, 
             total_steps=total_steps, # Exact number of batch updates
             pct_start=0.1,           # Warmup for first 20% (2 epochs)
             anneal_strategy='cos',   # Cosine shape
@@ -467,13 +476,14 @@ def train(gpu, opt, output_dir):
                     train_sampler.set_epoch(epoch)
                 #lr_scheduler.step(epoch) #seem to be deprecated?
                 #lr_scheduler.step()
-                new_energy_w, new_grid_w, new_e_channel_w = get_constraint_weights_correction(epoch)
+                new_energy_w, new_grid_w, new_e_channel_w = get_constraint_weights(epoch)
                 print(f"Epoch {epoch}: Setting grid weight to {new_grid_w:.4f}, energy weight to {new_energy_w:.4f}, and e_channel weight to {new_e_channel_w:.4f}")
                 
                 #  Update the loss attributes 
                 rf_criterion.energy_weight = new_energy_w
                 rf_criterion.grid_weight = new_grid_w
                 rf_criterion.e_channel_weight = new_e_channel_w
+                logger.info(f"Epoch {epoch}: Updated constraint weights - Grid: {new_grid_w:.4f}, Energy: {new_energy_w:.4f}, E_channel: {new_e_channel_w:.4f}")
 
                 for i, data in enumerate(dataloader):
                     if opt.dataname == 'g4' or opt.dataname == 'idl':
@@ -719,7 +729,7 @@ def parse_args():
     parser.add_argument('--pthsave', default='/pscratch/sd/c/ccardona/datasets/pth/reflow/')
     #parser.add_argument('--dataname',  default='g4', help='dataset name: shapenet | g4')
     parser.add_argument('--dataname',  default='idl', help='dataset name: shapenet | g4')
-    parser.add_argument('--bs', type=int, default=30, help='input batch size')
+    parser.add_argument('--bs', type=int, default=56, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=20000, help='number of epochs to train for')
     parser.add_argument('--nc', type=int, default=4)

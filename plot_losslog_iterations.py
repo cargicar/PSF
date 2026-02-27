@@ -76,7 +76,7 @@ def plot_loss_from_log(file_path, start_ite = 20):
 
     # --- SMOOTHING LOGIC ---
     # Define how many points to average over (adjust this to make it smoother/sharper)
-    window_size = 10
+    window_size = 30
     
     # Adjust iterations to match the length of smoothed data 
     # (Convolution with mode='valid' shortens the array by window_size - 1)
@@ -119,4 +119,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         log_file = sys.argv[1]
         
-    plot_loss_from_log(full_path, start_ite=40)
+    plot_loss_from_log(full_path, start_ite=0)
